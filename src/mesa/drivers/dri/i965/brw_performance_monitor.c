@@ -42,7 +42,16 @@
  * intel_perf_counters utility (which is available as part of intel-gpu-tools).
  */
 
+#include <linux/perf_event.h>
+
 #include <limits.h>
+
+#include <asm/unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
 
 #include "main/bitset.h"
 #include "main/hash.h"
@@ -79,12 +88,16 @@ struct brw_perf_monitor_object
    /**
     * Storage for OA results accumulated so far.
     *
-    * An array indexed by the counter ID in the OA_COUNTERS group.
+    * An array indexed by the counter ID in the brw_oa_counter_id enum.
     *
-    * When we run out of space in bookend_bo, we compute the results so far
-    * and add them to the value stored here.  Then, we can discard bookend_bo.
+    * When we run out of space in bookend_bo, we accumulate the deltas
+    * accrued so far and add them to the value stored here.  Then, we
+    * can discard bookend_bo.
     */
-   uint32_t *oa_results;
+   uint64_t oa_accumulator[MAX_OA_COUNTERS];
+
+   /** Indicates that that we've accumulated all snapshots */
+   bool finished_gather;
 
    /**
     * BO containing starting and ending snapshots for any active pipeline
@@ -97,6 +110,28 @@ struct brw_perf_monitor_object
     */
    uint64_t *pipeline_stats_results;
 };
+
+/* attr.config */
+enum i915_perf_oa_report_format {
+   I915_PERF_OA_FORMAT_A13_HSW =       0,
+   I915_PERF_OA_FORMAT_A29_HSW =       1,
+   I915_PERF_OA_FORMAT_A13_B8_C8_HSW = 2,
+   I915_PERF_OA_FORMAT_A29_B8_C8_HSW = 3,
+   I915_PERF_OA_FORMAT_B4_C8_HSW =     4,
+   I915_PERF_OA_FORMAT_A45_B8_C8_HSW = 5,
+   I915_PERF_OA_FORMAT_B4_C8_A16_HSW = 6,
+   I915_PERF_OA_FORMAT_C4_B8_HSW =     7
+};
+
+/* attr.config1 */
+#define I915_PERF_OA_SINGLE_CONTEXT_ENABLE  1
+
+/* FIXME: HACK to dig out the context id from the
+ * otherwise opaque drm_intel_context struct! */
+struct _drm_intel_context {
+   unsigned int ctx_id;
+};
+static int eu_count = 0; /* FIXME - find a better home */
 
 /** Downcasting convenience macro. */
 static inline struct brw_perf_monitor_object *
@@ -120,6 +155,14 @@ brw_perf_monitor(struct gl_perf_monitor_object *m)
       .Maximum = { .u32 = ~0 }, \
    }
 
+#define PERCENTAGE(name)         \
+   {                             \
+      .Name = name,              \
+      .Type = GL_PERCENTAGE_AMD, \
+      .Minimum = { .f = 0   },   \
+      .Maximum = { .f = 100 },   \
+   }
+
 #define COUNTER64(name)              \
    {                                 \
       .Name = name,                  \
@@ -140,178 +183,6 @@ brw_perf_monitor(struct gl_perf_monitor_object *m)
 enum brw_counter_groups {
    OA_COUNTERS, /* Observability Architecture (MI_REPORT_PERF_COUNT) Counters */
    PIPELINE_STATS_COUNTERS, /* Pipeline Statistics Register Counters */
-};
-
-/**
- * Ironlake:
- *  @{
- *
- * The list of CHAPS counters unfortunately does not appear in any public
- * documentation, but is available by reading the source code for the
- * intel_perf_counters utility (shipped as part of intel-gpu-tools).
- */
-const static struct gl_perf_monitor_counter gen5_raw_chaps_counters[] = {
-   COUNTER("cycles the CS unit is starved"),
-   COUNTER("cycles the CS unit is stalled"),
-   COUNTER("cycles the VF unit is starved"),
-   COUNTER("cycles the VF unit is stalled"),
-   COUNTER("cycles the VS unit is starved"),
-   COUNTER("cycles the VS unit is stalled"),
-   COUNTER("cycles the GS unit is starved"),
-   COUNTER("cycles the GS unit is stalled"),
-   COUNTER("cycles the CL unit is starved"),
-   COUNTER("cycles the CL unit is stalled"),
-   COUNTER("cycles the SF unit is starved"),
-   COUNTER("cycles the SF unit is stalled"),
-   COUNTER("cycles the WZ unit is starved"),
-   COUNTER("cycles the WZ unit is stalled"),
-   COUNTER("Z buffer read/write"),
-   COUNTER("cycles each EU was active"),
-   COUNTER("cycles each EU was suspended"),
-   COUNTER("cycles threads loaded all EUs"),
-   COUNTER("cycles filtering active"),
-   COUNTER("cycles PS threads executed"),
-   COUNTER("subspans written to RC"),
-   COUNTER("bytes read for texture reads"),
-   COUNTER("texels returned from sampler"),
-   COUNTER("polygons not culled"),
-   COUNTER("clocks MASF has valid message"),
-   COUNTER("64b writes/reads from RC"),
-   COUNTER("reads on dataport"),
-   COUNTER("clocks MASF has valid msg not consumed by sampler"),
-   COUNTER("cycles any EU is stalled for math"),
-};
-
-const static int gen5_oa_snapshot_layout[] =
-{
-   -1, /* Report ID */
-   -1, /* TIMESTAMP (64-bit) */
-   -1, /* ...second half... */
-    0, /* cycles the CS unit is starved */
-    1, /* cycles the CS unit is stalled */
-    2, /* cycles the VF unit is starved */
-    3, /* cycles the VF unit is stalled */
-    4, /* cycles the VS unit is starved */
-    5, /* cycles the VS unit is stalled */
-    6, /* cycles the GS unit is starved */
-    7, /* cycles the GS unit is stalled */
-    8, /* cycles the CL unit is starved */
-    9, /* cycles the CL unit is stalled */
-   10, /* cycles the SF unit is starved */
-   11, /* cycles the SF unit is stalled */
-   12, /* cycles the WZ unit is starved */
-   13, /* cycles the WZ unit is stalled */
-   14, /* Z buffer read/write */
-   15, /* cycles each EU was active */
-   16, /* cycles each EU was suspended */
-   17, /* cycles threads loaded all EUs */
-   18, /* cycles filtering active */
-   19, /* cycles PS threads executed */
-   20, /* subspans written to RC */
-   21, /* bytes read for texture reads */
-   22, /* texels returned from sampler */
-   23, /* polygons not culled */
-   24, /* clocks MASF has valid message */
-   25, /* 64b writes/reads from RC */
-   26, /* reads on dataport */
-   27, /* clocks MASF has valid msg not consumed by sampler */
-   28, /* cycles any EU is stalled for math */
-};
-
-const static struct gl_perf_monitor_group gen5_groups[] = {
-   [OA_COUNTERS] = GROUP("CHAPS Counters", INT_MAX, gen5_raw_chaps_counters),
-   /* Our pipeline statistics counter handling requires hardware contexts. */
-};
-/** @} */
-
-/**
- * Sandybridge:
- *  @{
- *
- * A few of the counters here (A17-A20) are not included in the latest
- * documentation, but are described in the Ironlake PRM (which strangely
- * documents Sandybridge's performance counter system, not Ironlake's).
- * It's unclear whether they work or not; empirically, they appear to.
- */
-
-/**
- * Aggregating counters A0-A28:
- */
-const static struct gl_perf_monitor_counter gen6_raw_oa_counters[] = {
-   /* A0:   0 */ COUNTER("Aggregated Core Array Active"),
-   /* A1:   1 */ COUNTER("Aggregated Core Array Stalled"),
-   /* A2:   2 */ COUNTER("Vertex Shader Active Time"),
-   /* A3: Not actually hooked up on Sandybridge. */
-   /* A4:   3 */ COUNTER("Vertex Shader Stall Time - Core Stall"),
-   /* A5:   4 */ COUNTER("# VS threads loaded"),
-   /* A6:   5 */ COUNTER("Vertex Shader Ready but not running Time"),
-   /* A7:   6 */ COUNTER("Geometry Shader Active Time"),
-   /* A8: Not actually hooked up on Sandybridge. */
-   /* A9:   7 */ COUNTER("Geometry Shader Stall Time - Core Stall"),
-   /* A10:  8 */ COUNTER("# GS threads loaded"),
-   /* A11:  9 */ COUNTER("Geometry Shader Ready but not running Time"),
-   /* A12: 10 */ COUNTER("Pixel Shader Active Time"),
-   /* A13: Not actually hooked up on Sandybridge. */
-   /* A14: 11 */ COUNTER("Pixel Shader Stall Time - Core Stall"),
-   /* A15: 12 */ COUNTER("# PS threads loaded"),
-   /* A16: 13 */ COUNTER("Pixel Shader Ready but not running Time"),
-   /* A17: 14 */ COUNTER("Early Z Test Pixels Passing"),
-   /* A18: 15 */ COUNTER("Early Z Test Pixels Failing"),
-   /* A19: 16 */ COUNTER("Early Stencil Test Pixels Passing"),
-   /* A20: 17 */ COUNTER("Early Stencil Test Pixels Failing"),
-   /* A21: 18 */ COUNTER("Pixel Kill Count"),
-   /* A22: 19 */ COUNTER("Alpha Test Pixels Failed"),
-   /* A23: 20 */ COUNTER("Post PS Stencil Pixels Failed"),
-   /* A24: 21 */ COUNTER("Post PS Z buffer Pixels Failed"),
-   /* A25: 22 */ COUNTER("Pixels/samples Written in the frame buffer"),
-   /* A26: 23 */ COUNTER("GPU Busy"),
-   /* A27: 24 */ COUNTER("CL active and not stalled"),
-   /* A28: 25 */ COUNTER("SF active and stalled"),
-};
-
-/**
- * Sandybridge: Counter Select = 001
- * A0   A1   A2   A3   A4   TIMESTAMP RPT_ID
- * A5   A6   A7   A8   A9   A10  A11  A12
- * A13  A14  A15  A16  A17  A18  A19  A20
- * A21  A22  A23  A24  A25  A26  A27  A28
- *
- * (Yes, this is a strange order.)  We also have to remap for missing counters.
- */
-const static int gen6_oa_snapshot_layout[] =
-{
-   -1, /* Report ID */
-   -1, /* TIMESTAMP (64-bit) */
-   -1, /* ...second half... */
-    3, /* A4:  Vertex Shader Stall Time - Core Stall */
-   -1, /* A3:  (not available) */
-    2, /* A2:  Vertex Shader Active Time */
-    1, /* A1:  Aggregated Core Array Stalled */
-    0, /* A0:  Aggregated Core Array Active */
-   10, /* A12: Pixel Shader Active Time */
-    9, /* A11: Geometry Shader ready but not running Time */
-    8, /* A10: # GS threads loaded */
-    7, /* A9:  Geometry Shader Stall Time - Core Stall */
-   -1, /* A8:  (not available) */
-    6, /* A7:  Geometry Shader Active Time */
-    5, /* A6:  Vertex Shader ready but not running Time */
-    4, /* A5:  # VS Threads Loaded */
-   17, /* A20: Early Stencil Test Pixels Failing */
-   16, /* A19: Early Stencil Test Pixels Passing */
-   15, /* A18: Early Z Test Pixels Failing */
-   14, /* A17: Early Z Test Pixels Passing */
-   13, /* A16: Pixel Shader ready but not running Time */
-   12, /* A15: # PS threads loaded */
-   11, /* A14: Pixel Shader Stall Time - Core Stall */
-   -1, /* A13: (not available) */
-   25, /* A28: SF active and stalled */
-   24, /* A27: CL active and not stalled */
-   23, /* A26: GPU Busy */
-   22, /* A25: Pixels/samples Written in the frame buffer */
-   21, /* A24: Post PS Z buffer Pixels Failed */
-   20, /* A23: Post PS Stencil Pixels Failed */
-   19, /* A22: Alpha Test Pixels Failed */
-   18, /* A21: Pixel Kill Count */
 };
 
 const static struct gl_perf_monitor_counter gen6_statistics_counters[] = {
@@ -344,127 +215,85 @@ const static int gen6_statistics_register_addresses[] = {
 };
 
 const static struct gl_perf_monitor_group gen6_groups[] = {
-   GROUP("Observability Architecture Counters", INT_MAX, gen6_raw_oa_counters),
    GROUP("Pipeline Statistics Registers", INT_MAX, gen6_statistics_counters),
 };
-/** @} */
+
 
 /**
- * Ivybridge/Baytrail/Haswell:
+ * Haswell:
  *  @{
  */
-const static struct gl_perf_monitor_counter gen7_raw_oa_counters[] = {
-   COUNTER("Aggregated Core Array Active"),
-   COUNTER("Aggregated Core Array Stalled"),
-   COUNTER("Vertex Shader Active Time"),
-   COUNTER("Vertex Shader Stall Time - Core Stall"),
-   COUNTER("# VS threads loaded"),
-   COUNTER("Hull Shader Active Time"),
-   COUNTER("Hull Shader Stall Time - Core Stall"),
-   COUNTER("# HS threads loaded"),
-   COUNTER("Domain Shader Active Time"),
-   COUNTER("Domain Shader Stall Time - Core Stall"),
-   COUNTER("# DS threads loaded"),
-   COUNTER("Compute Shader Active Time"),
-   COUNTER("Compute Shader Stall Time - Core Stall"),
-   COUNTER("# CS threads loaded"),
-   COUNTER("Geometry Shader Active Time"),
-   COUNTER("Geometry Shader Stall Time - Core Stall"),
-   COUNTER("# GS threads loaded"),
-   COUNTER("Pixel Shader Active Time"),
-   COUNTER("Pixel Shader Stall Time - Core Stall"),
-   COUNTER("# PS threads loaded"),
-   COUNTER("HiZ Fast Z Test Pixels Passing"),
-   COUNTER("HiZ Fast Z Test Pixels Failing"),
-   COUNTER("Slow Z Test Pixels Passing"),
-   COUNTER("Slow Z Test Pixels Failing"),
-   COUNTER("Pixel Kill Count"),
-   COUNTER("Alpha Test Pixels Failed"),
-   COUNTER("Post PS Stencil Pixels Failed"),
-   COUNTER("Post PS Z buffer Pixels Failed"),
-   COUNTER("3D/GPGPU Render Target Writes"),
-   COUNTER("Render Engine Busy"),
-   COUNTER("VS bottleneck"),
-   COUNTER("GS bottleneck"),
+const static struct gl_perf_monitor_counter gen7_normalized_oa_counters[] = {
+   PERCENTAGE("Render Engine Busy"),
+   PERCENTAGE("EU Active"),
+   PERCENTAGE("EU Stalled"),
+   PERCENTAGE("VS EU Active"),
+   PERCENTAGE("VS EU Stalled"),
+   COUNTER64("Average Cycles per VS Thread"),
+   COUNTER64("Average Stalled Cycles per VS Thread"),
+   PERCENTAGE("HS EU Active"),
+   PERCENTAGE("HS EU Stalled"),
+   COUNTER64("Average Cycles per HS Thread"),
+   COUNTER64("Average Stalled Cycles per HS Thread"),
+   PERCENTAGE("DS EU Active"),
+   PERCENTAGE("DS EU Stalled"),
+   COUNTER64("Average Cycles per DS Thread"),
+   COUNTER64("Average Stalled Cycles per DS Thread"),
+   PERCENTAGE("CS EU Active"),
+   PERCENTAGE("CS EU Stalled"),
+   COUNTER64("Average Cycles per CS Thread"),
+   COUNTER64("Average Stalled Cycles per CS Thread"),
+   PERCENTAGE("GS EU Active"),
+   PERCENTAGE("GS EU Stalled"),
+   COUNTER64("Average Cycles per GS Thread"),
+   COUNTER64("Average Stalled Cycles per GS Thread"),
+   PERCENTAGE("PS EU Active"),
+   PERCENTAGE("PS EU Stalled"),
+   COUNTER64("Average Cycles per PS Thread"),
+   COUNTER64("Average Stalled Cycles per PS Thread"),
+
+   /* XXX: Just for debugging.... */
+   COUNTER64("GPU Timestamp"),
+   COUNTER64("GPU Clock"),
 };
 
-/**
- * Ivybridge/Baytrail/Haswell: Counter Select = 101
- * A4   A3   A2   A1   A0   TIMESTAMP  ReportID
- * A12  A11  A10  A9   A8   A7   A6    A5
- * A20  A19  A18  A17  A16  A15  A14   A13
- * A28  A27  A26  A25  A24  A23  A22   A21
- * A36  A35  A34  A33  A32  A31  A30   A29
- * A44  A43  A42  A41  A40  A39  A38   A37
- * B7   B6   B5   B4   B3   B2   B1    B0
- * Rsv  Rsv  Rsv  Rsv  Rsv  Rsv  Rsv   Rsv
- */
-const static int gen7_oa_snapshot_layout[] =
-{
-   -1, /* Report ID */
-   -1, /* TIMESTAMP (64-bit) */
-   -1, /* ...second half... */
-    0, /* A0:  Aggregated Core Array Active */
-    1, /* A1:  Aggregated Core Array Stalled */
-    2, /* A2:  Vertex Shader Active Time */
-   -1, /* A3:  Reserved */
-    3, /* A4:  Vertex Shader Stall Time - Core Stall */
-    4, /* A5:  # VS threads loaded */
-   -1, /* A6:  Reserved */
-    5, /* A7:  Hull Shader Active Time */
-   -1, /* A8:  Reserved */
-    6, /* A9:  Hull Shader Stall Time - Core Stall */
-    7, /* A10: # HS threads loaded */
-   -1, /* A11: Reserved */
-    8, /* A12: Domain Shader Active Time */
-   -1, /* A13: Reserved */
-    9, /* A14: Domain Shader Stall Time - Core Stall */
-   10, /* A15: # DS threads loaded */
-   -1, /* A16: Reserved */
-   11, /* A17: Compute Shader Active Time */
-   -1, /* A18: Reserved */
-   12, /* A19: Compute Shader Stall Time - Core Stall */
-   13, /* A20: # CS threads loaded */
-   -1, /* A21: Reserved */
-   14, /* A22: Geometry Shader Active Time */
-   -1, /* A23: Reserved */
-   15, /* A24: Geometry Shader Stall Time - Core Stall */
-   16, /* A25: # GS threads loaded */
-   -1, /* A26: Reserved */
-   17, /* A27: Pixel Shader Active Time */
-   -1, /* A28: Reserved */
-   18, /* A29: Pixel Shader Stall Time - Core Stall */
-   19, /* A30: # PS threads loaded */
-   -1, /* A31: Reserved */
-   20, /* A32: HiZ Fast Z Test Pixels Passing */
-   21, /* A33: HiZ Fast Z Test Pixels Failing */
-   22, /* A34: Slow Z Test Pixels Passing */
-   23, /* A35: Slow Z Test Pixels Failing */
-   24, /* A36: Pixel Kill Count */
-   25, /* A37: Alpha Test Pixels Failed */
-   26, /* A38: Post PS Stencil Pixels Failed */
-   27, /* A39: Post PS Z buffer Pixels Failed */
-   28, /* A40: 3D/GPGPU Render Target Writes */
-   29, /* A41: Render Engine Busy */
-   30, /* A42: VS bottleneck */
-   31, /* A43: GS bottleneck */
-   -1, /* A44: Reserved */
-   -1, /* B0 */
-   -1, /* B1 */
-   -1, /* B2 */
-   -1, /* B3 */
-   -1, /* B4 */
-   -1, /* B5 */
-   -1, /* B6 */
-   -1, /* B7 */
-   -1, /* Reserved */
-   -1, /* Reserved */
-   -1, /* Reserved */
-   -1, /* Reserved */
-   -1, /* Reserved */
-   -1, /* Reserved */
-   -1, /* Reserved */
-   -1, /* Reserved */
+enum brw_oa_counter_id gen7_oa_counter_map[] = {
+   OA_RENDER_BUSY_PERCENTAGE,
+   OA_EU_ACTIVE_PERCENTAGE,
+   OA_EU_STALLED_PERCENTAGE,
+
+   OA_VS_EU_ACTIVE_PERCENTAGE,
+   OA_VS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_VS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_VS_THREAD_CYCLES,
+
+   OA_HS_EU_ACTIVE_PERCENTAGE,
+   OA_HS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_HS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_HS_THREAD_CYCLES,
+
+   OA_DS_EU_ACTIVE_PERCENTAGE,
+   OA_DS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_DS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_DS_THREAD_CYCLES,
+
+   OA_CS_EU_ACTIVE_PERCENTAGE,
+   OA_CS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_CS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_CS_THREAD_CYCLES,
+
+   OA_GS_EU_ACTIVE_PERCENTAGE,
+   OA_GS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_GS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_GS_THREAD_CYCLES,
+
+   OA_PS_EU_ACTIVE_PERCENTAGE,
+   OA_PS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_PS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_PS_THREAD_CYCLES,
+
+   OA_GPU_TIMESTAMP,
+   OA_GPU_CORE_CLOCK
 };
 
 const static struct gl_perf_monitor_counter gen7_statistics_counters[] = {
@@ -513,7 +342,7 @@ const static int gen7_statistics_register_addresses[] = {
 };
 
 const static struct gl_perf_monitor_group gen7_groups[] = {
-   GROUP("Observability Architecture Counters", INT_MAX, gen7_raw_oa_counters),
+   GROUP("Observability Architecture Counters", INT_MAX, gen7_normalized_oa_counters),
    GROUP("Pipeline Statistics Registers", INT_MAX, gen7_statistics_counters),
 };
 /** @} */
@@ -555,7 +384,8 @@ void
 brw_dump_perf_monitors(struct brw_context *brw)
 {
    struct gl_context *ctx = &brw->ctx;
-   DBG("Monitors: (OA users = %d)\n", brw->perfmon.oa_users);
+   DBG("Monitors: (Open monitors = %d, OA users = %d)\n",
+       brw->perfmon.open_oa_monitors, brw->perfmon.oa_users);
    _mesa_HashWalk(ctx->PerfMonitor.Monitors, dump_perf_monitor_callback, brw);
 }
 
@@ -634,53 +464,6 @@ monitor_needs_oa(struct brw_context *brw,
                  struct gl_perf_monitor_object *m)
 {
    return m->ActiveGroups[OA_COUNTERS];
-}
-
-/**
- * Enable the Observability Architecture counters by whacking OACONTROL.
- */
-static void
-start_oa_counters(struct brw_context *brw)
-{
-   unsigned counter_format;
-
-   /* Pick the counter format which gives us all the counters. */
-   switch (brw->gen) {
-   case 5:
-      return; /* Ironlake counters are always running. */
-   case 6:
-      counter_format = 0b001;
-      break;
-   case 7:
-      counter_format = 0b101;
-      break;
-   default:
-      unreachable("Tried to enable OA counters on an unsupported generation.");
-   }
-
-   BEGIN_BATCH(3);
-   OUT_BATCH(MI_LOAD_REGISTER_IMM | (3 - 2));
-   OUT_BATCH(OACONTROL);
-   OUT_BATCH(counter_format << OACONTROL_COUNTER_SELECT_SHIFT |
-             OACONTROL_ENABLE_COUNTERS);
-   ADVANCE_BATCH();
-}
-
-/**
- * Disable OA counters.
- */
-static void
-stop_oa_counters(struct brw_context *brw)
-{
-   /* Ironlake counters never stop. */
-   if (brw->gen == 5)
-      return;
-
-   BEGIN_BATCH(3);
-   OUT_BATCH(MI_LOAD_REGISTER_IMM | (3 - 2));
-   OUT_BATCH(OACONTROL);
-   OUT_BATCH(0);
-   ADVANCE_BATCH();
 }
 
 /**
@@ -823,6 +606,19 @@ drop_from_unresolved_monitor_list(struct brw_context *brw,
    }
 }
 
+/* XXX: For BDW+ we'll need to check fuse registers */
+static int
+get_eu_count(uint32_t devid)
+{
+   if (IS_HSW_GT1(devid))
+      return 10;
+   if (IS_HSW_GT2(devid))
+      return 20;
+   if (IS_HSW_GT3(devid))
+      return 40;
+   assert(0);
+}
+
 /**
  * Given pointers to starting and ending OA snapshots, add the deltas for each
  * counter to the results.
@@ -836,27 +632,15 @@ add_deltas(struct brw_context *brw,
    assert(start[0] == REPORT_ID);
    assert(end[0] == REPORT_ID);
 
-   /* Subtract each counter's ending and starting values, then add the
-    * difference to the counter's value so far.
-    */
-   for (int i = 3; i < brw->perfmon.entries_per_oa_snapshot; i++) {
-      /* When debugging, it's useful to note when the ending value is less than
-       * the starting value; aggregating counters should always increase in
-       * value (or remain unchanged).  This happens periodically due to
-       * wraparound, but can also indicate serious problems.
-       */
-#ifdef DEBUG
-      if (end[i] < start[i]) {
-         int counter = brw->perfmon.oa_snapshot_layout[i];
-         if (counter >= 0) {
-            DBG("WARNING: \"%s\" ending value was less than the starting "
-                "value: %u < %u (end - start = %u)\n",
-                brw->ctx.PerfMonitor.Groups[0].Counters[counter].Name,
-                end[i], start[i], end[i] - start[i]);
-         }
-      }
-#endif
-      monitor->oa_results[i] += end[i] - start[i];
+   for (int i = 0; i < MAX_OA_COUNTERS; i++) {
+      struct brw_oa_counter *counter = &brw->perfmon.oa_counters[i];
+
+      if (!counter->accumulate)
+         continue;
+
+      counter->accumulate(counter,
+                          start, end,
+                          monitor->oa_accumulator);
    }
 }
 
@@ -890,20 +674,20 @@ gather_oa_results(struct brw_context *brw,
                   uint32_t *bookend_buffer)
 {
    struct gl_perf_monitor_object *m = &monitor->base;
-   assert(monitor->oa_bo != NULL);
 
-   drm_intel_bo_map(monitor->oa_bo, false);
+   assert(monitor->oa_bo != NULL);
+   assert(monitor->oa_bo->virtual != NULL);
+
    uint32_t *monitor_buffer = monitor->oa_bo->virtual;
 
    /* If monitoring was entirely contained within a single batch, then the
     * bookend BO is irrelevant.  Just subtract monitor->bo's two snapshots.
     */
-   if (monitor->oa_middle_start == -1) {
+   if (m->Ended && monitor->oa_middle_start == -1) {
       add_deltas(brw, monitor,
                  monitor_buffer,
                  monitor_buffer + (SECOND_SNAPSHOT_OFFSET_IN_BYTES /
                                    sizeof(uint32_t)));
-      drm_intel_bo_unmap(monitor->oa_bo);
       return;
    }
 
@@ -948,20 +732,12 @@ gather_oa_results(struct brw_context *brw,
                  bookend_buffer + snapshot_size * monitor->oa_tail_start,
                  monitor_buffer + (SECOND_SNAPSHOT_OFFSET_IN_BYTES /
                                    sizeof(uint32_t)));
-   }
-
-   drm_intel_bo_unmap(monitor->oa_bo);
-
-   /* If the monitor has ended, then we've gathered all the results, and
-    * can free the monitor's OA BO.
-    */
-   if (m->Ended) {
-      drm_intel_bo_unreference(monitor->oa_bo);
-      monitor->oa_bo = NULL;
 
       /* The monitor's OA result is now resolved. */
       DBG("Marking %d resolved - results gathered\n", m->Name);
       drop_from_unresolved_monitor_list(brw, monitor);
+
+      monitor->finished_gather = true;
    }
 }
 
@@ -995,7 +771,9 @@ wrap_bookend_bo(struct brw_context *brw)
       struct brw_perf_monitor_object *monitor = brw->perfmon.unresolved[i];
       struct gl_perf_monitor_object *m = &monitor->base;
 
+      drm_intel_bo_map(monitor->oa_bo, false);
       gather_oa_results(brw, monitor, bookend_buffer);
+      drm_intel_bo_unmap(monitor->oa_bo);
 
       if (m->Ended) {
          /* gather_oa_results() dropped the monitor from the unresolved list,
@@ -1052,6 +830,77 @@ emit_bookend_snapshot(struct brw_context *brw)
 
 /******************************************************************************/
 
+static uint64_t
+read_file_uint64 (const char *file)
+{
+        char buf[32];
+        int fd, n;
+
+        fd = open(file, 0);
+        if (fd < 0)
+                return 0;
+        n = read(fd, buf, sizeof (buf) - 1);
+        close(fd);
+        if (n < 0)
+                return 0;
+
+        buf[n] = '\0';
+        return strtoull(buf, 0, 0);
+}
+
+static uint64_t
+lookup_i915_oa_id (void)
+{
+   return read_file_uint64 ("/sys/bus/event_source/devices/i915_oa/type");
+}
+
+static long
+perf_event_open (struct perf_event_attr *hw_event,
+                 pid_t pid,
+                 int cpu,
+                 int group_fd,
+                 unsigned long flags)
+{
+   return syscall (__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
+}
+
+static int
+open_i915_oa_event (enum i915_perf_oa_report_format report_format,
+                    bool single_context,
+                    uint32_t ctx_id)
+{
+   struct perf_event_attr attr;
+   int event_fd;
+
+   memset(&attr, 0, sizeof (struct perf_event_attr));
+   attr.size = sizeof (struct perf_event_attr);
+   attr.type = lookup_i915_oa_id();
+   attr.config = report_format;
+
+   attr.config1 = 0;
+   if (single_context)
+      attr.config1 |= I915_PERF_OA_SINGLE_CONTEXT_ENABLE | (ctx_id<<1);
+
+   attr.sample_type = PERF_SAMPLE_TIME | PERF_SAMPLE_READ | PERF_SAMPLE_RAW;
+   attr.disabled = 1;
+   attr.sample_period = 1;
+
+   //To avoid needing CAP_SYS_ADMIN...
+   attr.exclude_kernel = 1;
+
+   event_fd = perf_event_open(&attr,
+                              -1,  /* pid */
+                              0, /* cpu */
+                              -1, /* group fd */
+                              PERF_FLAG_FD_CLOEXEC); /* flags */
+   if (event_fd == -1) {
+      DBG("WARNING: Error opening i915_oa perf event: %m\n");
+      return -1;
+   }
+
+   return event_fd;
+}
+
 /**
  * Initialize a monitor to sane starting state; throw away old buffers.
  */
@@ -1073,8 +922,7 @@ reinitialize_perf_monitor(struct brw_context *brw,
    monitor->oa_middle_start = -1;
    monitor->oa_tail_start = -1;
 
-   free(monitor->oa_results);
-   monitor->oa_results = NULL;
+   memset(monitor->oa_accumulator, 0, sizeof(monitor->oa_accumulator));
 
    if (monitor->pipeline_stats_bo) {
       drm_intel_bo_unreference(monitor->pipeline_stats_bo);
@@ -1100,6 +948,24 @@ brw_begin_perf_monitor(struct gl_context *ctx,
    reinitialize_perf_monitor(brw, monitor);
 
    if (monitor_needs_oa(brw, m)) {
+      /* If the OA counters aren't already on, enable them. */
+      if (brw->perfmon.perf_oa_event_fd == -1) {
+         int fd = open_i915_oa_event(I915_PERF_OA_FORMAT_A45_B8_C8_HSW,
+                                     true, /* profile single ctx */
+                                     brw->hw_ctx->ctx_id);
+         if (fd == -1)
+            return GL_FALSE; /* XXX: do we need to set GL error state? */
+
+         brw->perfmon.perf_oa_event_fd = fd;
+      }
+
+      if (brw->perfmon.oa_users == 0 &&
+          ioctl(brw->perfmon.perf_oa_event_fd, PERF_EVENT_IOC_ENABLE, 0) < 0)
+      {
+         DBG("WARNING: Error enabling i915_oa perf event: %m\n");
+         return GL_FALSE; /* XXX: do we need to set GL error state? */
+      }
+
       /* If the global OA bookend BO doesn't exist, allocate it.  This should
        * only happen once, but we delay until BeginPerfMonitor time to avoid
        * wasting memory for contexts that don't use performance monitors.
@@ -1119,18 +985,6 @@ brw_begin_perf_monitor(struct gl_context *ctx,
       drm_intel_bo_unmap(monitor->oa_bo);
 #endif
 
-      /* Allocate storage for accumulated OA counter values. */
-      monitor->oa_results =
-         calloc(brw->perfmon.entries_per_oa_snapshot, sizeof(uint32_t));
-
-      /* If the OA counters aren't already on, enable them. */
-      if (brw->perfmon.oa_users == 0) {
-         /* Ensure the OACONTROL enable and snapshot land in the same batch. */
-         int space = (MI_REPORT_PERF_COUNT_BATCH_DWORDS + 3) * 4;
-         intel_batchbuffer_require_space(brw, space, RENDER_RING);
-         start_oa_counters(brw);
-      }
-
       /* Take a starting OA counter snapshot. */
       emit_mi_report_perf_count(brw, monitor->oa_bo, 0, REPORT_ID);
 
@@ -1142,6 +996,7 @@ brw_begin_perf_monitor(struct gl_context *ctx,
       add_to_unresolved_monitor_list(brw, monitor);
 
       ++brw->perfmon.oa_users;
+      ++brw->perfmon.open_oa_monitors;
    }
 
    if (monitor_needs_statistics_registers(brw, m)) {
@@ -1172,10 +1027,7 @@ brw_end_perf_monitor(struct gl_context *ctx,
       emit_mi_report_perf_count(brw, monitor->oa_bo,
                                 SECOND_SNAPSHOT_OFFSET_IN_BYTES, REPORT_ID);
 
-      --brw->perfmon.oa_users;
-
-      if (brw->perfmon.oa_users == 0)
-         stop_oa_counters(brw);
+      --brw->perfmon.open_oa_monitors;
 
       if (monitor->oa_head_end == brw->perfmon.bookend_snapshots) {
          assert(monitor->oa_head_end != -1);
@@ -1264,6 +1116,9 @@ brw_get_perf_monitor_result(struct gl_context *ctx,
 {
    struct brw_context *brw = brw_context(ctx);
    struct brw_perf_monitor_object *monitor = brw_perf_monitor(m);
+   uint8_t *p = (uint8_t *)data;
+
+   assert(brw_is_perf_monitor_result_available(ctx, m));
 
    DBG("GetResult(%d)\n", m->Name);
    brw_dump_perf_monitors(brw);
@@ -1279,10 +1134,11 @@ brw_get_perf_monitor_result(struct gl_context *ctx,
    GLsizei offset = 0;
 
    if (monitor_needs_oa(brw, m)) {
-      /* Gather up the results from the BO, unless we already did due to the
-       * bookend BO wrapping.
-       */
-      if (monitor->oa_bo) {
+      int n_oa_counters = ctx->PerfMonitor.Groups[OA_COUNTERS].NumCounters;
+
+      drm_intel_bo_map(monitor->oa_bo, false);
+
+      if (!monitor->finished_gather) {
          /* Since the result is available, all the necessary snapshots will
           * have been written to the bookend BO.  If other monitors are
           * active, the bookend BO may be busy or referenced by the current
@@ -1299,22 +1155,62 @@ brw_get_perf_monitor_result(struct gl_context *ctx,
          drm_intel_bo_unmap(brw->perfmon.bookend_bo);
       }
 
-      for (int i = 0; i < brw->perfmon.entries_per_oa_snapshot; i++) {
-         int group = OA_COUNTERS;
-         int counter = brw->perfmon.oa_snapshot_layout[i];
+      /* Disabling the i915_oa event will effectively disable the OA
+       * counters.  Note it's important to be sure there are no outstanding
+       * MI_RPC commands at this point since they could stall the CS
+       * indefinitely once OACONTROL is disabled.
+       */
+      --brw->perfmon.oa_users;
+      if (brw->perfmon.oa_users == 0 &&
+          ioctl(brw->perfmon.perf_oa_event_fd, PERF_EVENT_IOC_DISABLE, 0) < 0)
+      {
+         DBG("WARNING: Error disabling i915_oa perf event: %m\n");
+      }
+
+      uint32_t *start = monitor->oa_bo->virtual;
+      uint32_t *end = start + (SECOND_SNAPSHOT_OFFSET_IN_BYTES /
+                               sizeof(uint32_t));
+
+      for (int i = 0; i < n_oa_counters; i++) {
+         enum brw_oa_counter_id id = brw->perfmon.oa_counter_map[i];
+         struct brw_oa_counter *counter = &brw->perfmon.oa_counters[id];
+         const struct gl_perf_monitor_counter *gl_counter =
+            &ctx->PerfMonitor.Groups[OA_COUNTERS].Counters[i];
 
          /* We always capture all the OA counters, but the application may
           * have only asked for a subset.  Skip unwanted counters.
           */
-         if (counter < 0 || !BITSET_TEST(m->ActiveCounters[group], counter))
+         if (!BITSET_TEST(m->ActiveCounters[OA_COUNTERS], i))
             continue;
 
-         data[offset++] = group;
-         data[offset++] = counter;
-         data[offset++] = monitor->oa_results[i];
+         *((uint32_t *)p) = OA_COUNTERS;
+         p += 4;
+         *((uint32_t *)p) = i;
+         p += 4;
+
+         switch(gl_counter->Type)
+         {
+         case GL_UNSIGNED_INT:
+            *((uint32_t *)p) =
+               counter->read(counter, start, end, monitor->oa_accumulator);
+            p += 4;
+            break;
+         case GL_PERCENTAGE_AMD:
+            /* TODO: Enable floating point precision instead of casting an int */
+            *((float *)p) =
+               counter->read(counter, start, end, monitor->oa_accumulator);
+            //printf("DEBUG PERCENTAGE: %s = %f\n", gl_counter->Name, *((float *)p));
+            p += 4;
+            break;
+         case GL_UNSIGNED_INT64_AMD:
+            *((uint64_t *)p) =
+               counter->read(counter, start, end, monitor->oa_accumulator);
+            p += 8;
+            break;
+         }
       }
 
-      clean_bookend_bo(brw);
+      drm_intel_bo_unmap(monitor->oa_bo);
    }
 
    if (monitor_needs_statistics_registers(brw, m)) {
@@ -1335,10 +1231,13 @@ brw_get_perf_monitor_result(struct gl_context *ctx,
 
       for (int i = 0; i < num_counters; i++) {
          if (BITSET_TEST(m->ActiveCounters[PIPELINE_STATS_COUNTERS], i)) {
-            data[offset++] = PIPELINE_STATS_COUNTERS;
-            data[offset++] = i;
-            *((uint64_t *) (&data[offset])) = monitor->pipeline_stats_results[i];
-            offset += 2;
+
+            *((uint32_t *)p) = PIPELINE_STATS_COUNTERS;
+            p += 4;
+            *((uint32_t *)p) = i;
+            p += 4;
+            *((uint64_t *)p) = monitor->pipeline_stats_results[i];
+            p += 8;
          }
       }
    }
@@ -1382,10 +1281,8 @@ brw_perf_monitor_new_batch(struct brw_context *brw)
    assert(brw->batch.ring == RENDER_RING);
    assert(brw->gen < 6 || brw->batch.used == 0);
 
-   if (brw->perfmon.oa_users == 0)
+   if (brw->perfmon.open_oa_monitors == 0)
       return;
-
-   start_oa_counters(brw);
 
    /* Make sure bookend_bo has enough space for a pair of snapshots.
     * If not, "wrap" the BO: gather up any results so far, and start from
@@ -1412,7 +1309,7 @@ brw_perf_monitor_finish_batch(struct brw_context *brw)
 {
    assert(brw->batch.ring == RENDER_RING);
 
-   if (brw->perfmon.oa_users == 0)
+   if (brw->perfmon.open_oa_monitors == 0)
       return;
 
    DBG("Bookend End Snapshot (%d)\n", brw->perfmon.bookend_snapshots);
@@ -1421,11 +1318,351 @@ brw_perf_monitor_finish_batch(struct brw_context *brw)
    assert(has_space_for_bookend_snapshots(brw, 1));
 
    emit_bookend_snapshot(brw);
-
-   stop_oa_counters(brw);
 }
 
 /******************************************************************************/
+
+static uint64_t
+read_oa_counter_raw_cb(struct brw_oa_counter *counter,
+                       uint32_t *report0,
+                       uint32_t *report1,
+                       uint64_t *accumulator)
+{
+   return report0[counter->report_offset];
+}
+
+static void
+accumulate_uint32_cb(struct brw_oa_counter *counter,
+                     uint32_t *report0,
+                     uint32_t *report1,
+                     uint64_t *accumulator)
+{
+   enum brw_oa_counter_id id = counter->id;
+
+   /* XXX: BRW introduces 40bit counters where we'll need to be a bit
+    * more careful considering wrapping */
+   accumulator[id] += (uint32_t)(report1[counter->report_offset] -
+                                 report0[counter->report_offset]);
+}
+
+static uint64_t
+read_report_timestamp(struct brw_context *brw, uint32_t *report)
+{
+   struct brw_oa_counter *counter = &brw->perfmon.oa_counters[OA_GPU_TIMESTAMP];
+
+   return counter->read(counter,
+                        report,
+                        NULL /* ignores report1 */,
+                        NULL /* ignores accumulated */);
+}
+
+static uint64_t
+read_oa_timestamp_cb(struct brw_oa_counter *counter,
+                     uint32_t *report0,
+                     uint32_t *report1,
+                     uint64_t *accumulator)
+{
+   uint32_t time0 = report0[counter->report_offset];
+   uint32_t time1 = report0[counter->report_offset + 1];
+   uint64_t timestamp = (uint64_t)time1 << 32 | time0;
+
+   /* The least significant timestamp bit represents 80ns on Haswell */
+   timestamp *= 80;
+   timestamp /= 1000; /* usecs */
+
+   return timestamp;
+}
+
+static struct brw_oa_counter *
+add_raw_oa_counter(struct brw_context *brw,
+                   enum brw_oa_counter_id id, int report_offset)
+{
+   struct brw_oa_counter *counter;
+
+   assert(id < MAX_OA_COUNTERS);
+
+   counter = &brw->perfmon.oa_counters[id];
+
+   counter->name = "raw";
+   counter->id = id;
+   counter->report_offset = report_offset;
+   counter->accumulate = accumulate_uint32_cb;
+   counter->read = read_oa_counter_raw_cb;
+
+   return counter;
+}
+
+static uint64_t
+read_oa_counter_normalized_by_gpu_duration_cb(struct brw_oa_counter *counter,
+                                              uint32_t *report0,
+                                              uint32_t *report1,
+                                              uint64_t *accumulated)
+{
+   uint64_t delta = accumulated[counter->id];
+   uint64_t clk_delta = accumulated[OA_GPU_CORE_CLOCK];
+
+   if (!clk_delta)
+      return 0;
+
+   return delta * 100 / clk_delta;
+}
+
+static struct brw_oa_counter *
+add_oa_counter_normalised_by_gpu_duration(struct brw_context *brw,
+                                          enum brw_oa_counter_id id,
+                                          const char *name,
+                                          int report_offset)
+{
+   struct brw_oa_counter *counter = add_raw_oa_counter(brw, id, report_offset);
+
+   counter->name = name;
+   counter->read = read_oa_counter_normalized_by_gpu_duration_cb;
+
+   return counter;
+}
+
+static uint64_t
+read_oa_counter_normalized_by_eu_duration_cb(struct brw_oa_counter *counter,
+                                             uint32_t *report0,
+                                             uint32_t *report1,
+                                             uint64_t *accumulated)
+{
+   uint64_t delta = accumulated[counter->id];
+   uint64_t clk_delta = accumulated[OA_GPU_CORE_CLOCK];
+
+   delta /= eu_count;
+
+   if (!clk_delta)
+      return 0;
+
+   return delta * 100 / clk_delta;
+}
+
+static struct brw_oa_counter *
+add_oa_counter_normalised_by_eu_duration(struct brw_context *brw,
+                                         enum brw_oa_counter_id id,
+                                         const char *name,
+                                         int report_offset)
+{
+   struct brw_oa_counter *counter = add_raw_oa_counter(brw, id, report_offset);
+
+   counter->name = name;
+   counter->read = read_oa_counter_normalized_by_eu_duration_cb;
+
+   return counter;
+}
+
+static uint64_t
+read_av_thread_cycles_counter_cb (struct brw_oa_counter *counter,
+                                  uint32_t *report0,
+                                  uint32_t *report1,
+                                  uint64_t *accumulated)
+{
+   uint64_t delta = accumulated[counter->id];
+   uint64_t spawned = accumulated[counter->config];
+
+   if (!spawned)
+      return 0;
+
+   return delta / spawned;
+}
+
+static struct brw_oa_counter *
+add_average_thread_cycles_oa_counter (struct brw_context *brw,
+                                      enum brw_oa_counter_id id,
+                                      const char *name,
+                                      int count_report_offset,
+                                      int denominator_report_offset)
+{
+   struct brw_oa_counter *counter = add_raw_oa_counter(brw, id, count_report_offset);
+
+   counter->name = name;
+   counter->read = read_av_thread_cycles_counter_cb;
+   counter->config = denominator_report_offset;
+
+   return counter;
+}
+
+static void
+init_hsw_oa_counters(struct brw_context *brw)
+{
+   struct brw_oa_counter *c;
+   int a_offset = 3; /* A0 */
+   int b_offset = a_offset + 45; /* B0 */
+
+   c = add_raw_oa_counter(brw, OA_GPU_TIMESTAMP, 1);
+   c->read = read_oa_timestamp_cb;
+
+   add_raw_oa_counter(brw, OA_AGGREGATE_CORE_ARRAYS_ACTIVE, a_offset);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_EU_ACTIVE_PERCENTAGE,
+                                            "EU Active %",
+                                            a_offset);
+   add_raw_oa_counter(brw, OA_AGGREGATE_CORE_ARRAYS_STALLED, a_offset + 1);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_EU_STALLED_PERCENTAGE,
+                                            "EU Stalled %",
+                                            a_offset + 1);
+   add_raw_oa_counter(brw, OA_VS_ACTIVE_TIME, a_offset + 2);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_VS_EU_ACTIVE_PERCENTAGE,
+                                            "VS EU Active %",
+                                            a_offset + 2);
+   add_raw_oa_counter(brw, OA_VS_STALL_TIME, a_offset + 3);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_VS_EU_STALLED_PERCENTAGE,
+                                            "VS EU Stalled %",
+                                            a_offset + 3);
+   add_raw_oa_counter(brw, OA_NUM_VS_THREADS_LOADED, a_offset + 5);
+
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_VS_THREAD_CYCLES,
+                                        "Av. cycles per VS thread",
+                                        a_offset + 2,
+                                        a_offset + 5);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_STALLED_VS_THREAD_CYCLES,
+                                        "Av. stalled cycles per VS thread",
+                                        a_offset + 3,
+                                        a_offset + 5);
+
+   add_raw_oa_counter(brw, OA_HS_ACTIVE_TIME, a_offset + 7);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_HS_EU_ACTIVE_PERCENTAGE,
+                                            "HS EU Active %",
+                                            a_offset + 7);
+   add_raw_oa_counter(brw, OA_HS_STALL_TIME, a_offset + 8);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_HS_EU_STALLED_PERCENTAGE,
+                                            "HS EU Stalled %",
+                                            a_offset + 8);
+   add_raw_oa_counter(brw, OA_NUM_HS_THREADS_LOADED, a_offset + 10);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_HS_THREAD_CYCLES,
+                                        "Av. cycles per HS thread",
+                                        a_offset + 7,
+                                        a_offset + 10);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_STALLED_HS_THREAD_CYCLES,
+                                        "Av. stalled cycles per HS thread",
+                                        a_offset + 8,
+                                        a_offset + 10);
+
+   add_raw_oa_counter(brw, OA_DS_ACTIVE_TIME, a_offset + 12);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_DS_EU_ACTIVE_PERCENTAGE,
+                                            "DS EU Active %",
+                                            a_offset + 12);
+   add_raw_oa_counter(brw, OA_DS_STALL_TIME, a_offset + 13);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_DS_EU_STALLED_PERCENTAGE,
+                                            "DS EU Stalled %",
+                                            a_offset + 13);
+   add_raw_oa_counter(brw, OA_NUM_DS_THREADS_LOADED, a_offset + 15);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_DS_THREAD_CYCLES,
+                                        "Av. cycles per DS thread",
+                                        a_offset + 12,
+                                        a_offset + 15);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_STALLED_DS_THREAD_CYCLES,
+                                        "Av. stalled cycles per DS thread",
+                                        a_offset + 13,
+                                        a_offset + 15);
+
+   add_raw_oa_counter(brw, OA_CS_ACTIVE_TIME, a_offset + 17);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_CS_EU_ACTIVE_PERCENTAGE,
+                                            "CS EU Active %",
+                                            a_offset + 17);
+   add_raw_oa_counter(brw, OA_CS_STALL_TIME, a_offset + 18);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_CS_EU_STALLED_PERCENTAGE,
+                                            "CS EU Stalled %",
+                                            a_offset + 18);
+   add_raw_oa_counter(brw, OA_NUM_CS_THREADS_LOADED, a_offset + 20);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_CS_THREAD_CYCLES,
+                                        "Av. cycles per CS thread",
+                                        a_offset + 17,
+                                        a_offset + 20);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_STALLED_CS_THREAD_CYCLES,
+                                        "Av. stalled cycles per CS thread",
+                                        a_offset + 18,
+                                        a_offset + 20);
+
+
+   add_raw_oa_counter(brw, OA_GS_ACTIVE_TIME, a_offset + 22);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_GS_EU_ACTIVE_PERCENTAGE,
+                                            "GS EU Active %",
+                                            a_offset + 22);
+   add_raw_oa_counter(brw, OA_GS_STALL_TIME, a_offset + 23);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_GS_EU_STALLED_PERCENTAGE,
+                                            "GS EU Stalled %",
+                                            a_offset + 23);
+   add_raw_oa_counter(brw, OA_NUM_GS_THREADS_LOADED, a_offset + 25);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_GS_THREAD_CYCLES,
+                                        "Av. cycles per GS thread",
+                                        a_offset + 22,
+                                        a_offset + 25);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_STALLED_GS_THREAD_CYCLES,
+                                        "Av. stalled cycles per GS thread",
+                                        a_offset + 23,
+                                        a_offset + 25);
+
+
+   add_raw_oa_counter(brw, OA_PS_ACTIVE_TIME, a_offset + 27);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_PS_EU_ACTIVE_PERCENTAGE,
+                                            "PS EU Active %",
+                                            a_offset + 27);
+   add_raw_oa_counter(brw, OA_PS_STALL_TIME, a_offset + 28);
+   add_oa_counter_normalised_by_eu_duration(brw,
+                                            OA_PS_EU_STALLED_PERCENTAGE,
+                                            "PS EU Stalled %",
+                                            a_offset + 28);
+   add_raw_oa_counter(brw, OA_NUM_PS_THREADS_LOADED, a_offset + 30);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_PS_THREAD_CYCLES,
+                                        "Av. cycles per PS thread",
+                                        a_offset + 27,
+                                        a_offset + 30);
+   add_average_thread_cycles_oa_counter(brw,
+                                        OA_AVERAGE_STALLED_PS_THREAD_CYCLES,
+                                        "Av. stalled cycles per PS thread",
+                                        a_offset + 28,
+                                        a_offset + 30);
+
+   add_raw_oa_counter(brw, OA_HIZ_FAST_Z_PASSING, a_offset + 32);
+   add_raw_oa_counter(brw, OA_HIZ_FAST_Z_FAILING, a_offset + 33);
+
+   add_raw_oa_counter(brw, OA_SLOW_Z_FAILING, a_offset + 35);
+
+   /* XXX: caveat: it's 2x real No. when PS has 2 output colors */
+   add_raw_oa_counter(brw, OA_PIXEL_KILL_COUNT, a_offset + 36);
+
+   add_raw_oa_counter(brw, OA_ALPHA_TEST_FAILED, a_offset + 37);
+   add_raw_oa_counter(brw, OA_POST_PS_STENCIL_TEST_FAILED, a_offset + 38);
+   add_raw_oa_counter(brw, OA_POST_PS_Z_TEST_FAILED, a_offset + 39);
+
+   add_raw_oa_counter(brw, OA_RENDER_TARGET_WRITES, a_offset + 40);
+
+   /* XXX: there are several conditions where this doesn't increment... */
+   add_raw_oa_counter(brw, OA_RENDER_ENGINE_BUSY, a_offset + 41);
+   add_oa_counter_normalised_by_gpu_duration(brw,
+                                             OA_RENDER_BUSY_PERCENTAGE,
+                                             "Render Engine Busy %",
+                                             a_offset + 41);
+
+   add_raw_oa_counter(brw, OA_VS_BOTTLENECK, a_offset + 42);
+   add_raw_oa_counter(brw, OA_GS_BOTTLENECK, a_offset + 43);
+   add_raw_oa_counter(brw, OA_GPU_CORE_CLOCK, b_offset);
+}
 
 void
 brw_init_performance_monitors(struct brw_context *brw)
@@ -1440,22 +1677,19 @@ brw_init_performance_monitors(struct brw_context *brw)
    ctx->Driver.IsPerfMonitorResultAvailable = brw_is_perf_monitor_result_available;
    ctx->Driver.GetPerfMonitorResult = brw_get_perf_monitor_result;
 
-   if (brw->gen == 5) {
-      ctx->PerfMonitor.Groups = gen5_groups;
-      ctx->PerfMonitor.NumGroups = ARRAY_SIZE(gen5_groups);
-      brw->perfmon.oa_snapshot_layout = gen5_oa_snapshot_layout;
-      brw->perfmon.entries_per_oa_snapshot = ARRAY_SIZE(gen5_oa_snapshot_layout);
-   } else if (brw->gen == 6) {
+   if (brw->gen == 6) {
       ctx->PerfMonitor.Groups = gen6_groups;
       ctx->PerfMonitor.NumGroups = ARRAY_SIZE(gen6_groups);
-      brw->perfmon.oa_snapshot_layout = gen6_oa_snapshot_layout;
-      brw->perfmon.entries_per_oa_snapshot = ARRAY_SIZE(gen6_oa_snapshot_layout);
+      brw->perfmon.entries_per_oa_snapshot = 0;
+      brw->perfmon.n_exposed_oa_counters = 0;
+      brw->perfmon.oa_counter_map = NULL;
       brw->perfmon.statistics_registers = gen6_statistics_register_addresses;
    } else if (brw->gen == 7) {
       ctx->PerfMonitor.Groups = gen7_groups;
       ctx->PerfMonitor.NumGroups = ARRAY_SIZE(gen7_groups);
-      brw->perfmon.oa_snapshot_layout = gen7_oa_snapshot_layout;
-      brw->perfmon.entries_per_oa_snapshot = ARRAY_SIZE(gen7_oa_snapshot_layout);
+      brw->perfmon.entries_per_oa_snapshot = 64;
+      brw->perfmon.n_exposed_oa_counters = ARRAY_SIZE(gen7_normalized_oa_counters); /* TODO: remove */
+      brw->perfmon.oa_counter_map = gen7_oa_counter_map;
       brw->perfmon.statistics_registers = gen7_statistics_register_addresses;
    }
 
@@ -1463,4 +1697,22 @@ brw_init_performance_monitors(struct brw_context *brw)
       ralloc_array(brw, struct brw_perf_monitor_object *, 1);
    brw->perfmon.unresolved_elements = 0;
    brw->perfmon.unresolved_array_size = 1;
+
+   brw->perfmon.perf_oa_event_fd = -1;
+
+   memset(brw->perfmon.oa_counters, 0, sizeof(brw->perfmon.oa_counters));
+   init_hsw_oa_counters(brw);
+
+   eu_count = get_eu_count(brw->intelScreen->deviceID);
+}
+
+void
+brw_destroy_performance_monitors(struct brw_context *brw)
+{
+   if (brw->perfmon.perf_oa_event_fd != -1) {
+      close(brw->perfmon.perf_oa_event_fd);
+      brw->perfmon.perf_oa_event_fd = -1;
+   }
+
+   /* FIXME: clean up bookend bo etc */
 }

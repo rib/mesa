@@ -869,6 +869,9 @@ intelDestroyContext(__DRIcontext * driContextPriv)
       aub_dump_bmp(&brw->ctx);
    }
 
+   if (ctx->Extensions.AMD_performance_monitor)
+      brw_destroy_performance_monitors(brw);
+
    _mesa_meta_free(&brw->ctx);
    brw_meta_fast_clear_free(brw);
 

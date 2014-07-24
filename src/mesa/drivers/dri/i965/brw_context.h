@@ -923,6 +923,113 @@ struct brw_stage_state
    uint32_t sampler_offset;
 };
 
+enum brw_oa_counter_id {
+
+   /* Deltas based on raw counters... */
+
+   OA_GPU_TIMESTAMP,
+
+   OA_GPU_CORE_CLOCK,
+
+   OA_AGGREGATE_CORE_ARRAYS_ACTIVE,
+   OA_AGGREGATE_CORE_ARRAYS_STALLED,
+
+   OA_VS_ACTIVE_TIME,
+   OA_VS_STALL_TIME,
+   OA_NUM_VS_THREADS_LOADED,
+
+   OA_HS_ACTIVE_TIME,
+   OA_HS_STALL_TIME,
+   OA_NUM_HS_THREADS_LOADED,
+
+   OA_DS_ACTIVE_TIME,
+   OA_DS_STALL_TIME,
+   OA_NUM_DS_THREADS_LOADED,
+
+   OA_CS_ACTIVE_TIME,
+   OA_CS_STALL_TIME,
+   OA_NUM_CS_THREADS_LOADED,
+
+   OA_GS_ACTIVE_TIME,
+   OA_GS_STALL_TIME,
+   OA_NUM_GS_THREADS_LOADED,
+
+   OA_PS_ACTIVE_TIME,
+   OA_PS_STALL_TIME,
+   OA_NUM_PS_THREADS_LOADED,
+
+   OA_HIZ_FAST_Z_PASSING,
+   OA_HIZ_FAST_Z_FAILING,
+
+   OA_SLOW_Z_FAILING,
+
+   OA_PIXEL_KILL_COUNT,
+
+   OA_ALPHA_TEST_FAILED,
+   OA_POST_PS_STENCIL_TEST_FAILED,
+   OA_POST_PS_Z_TEST_FAILED,
+
+   OA_RENDER_TARGET_WRITES,
+
+   OA_RENDER_ENGINE_BUSY,
+
+   OA_VS_BOTTLENECK,
+   OA_GS_BOTTLENECK,
+
+   /* Derived counters... */
+
+   OA_RENDER_BUSY_PERCENTAGE,
+
+   OA_EU_ACTIVE_PERCENTAGE,
+   OA_EU_STALLED_PERCENTAGE,
+
+   OA_VS_EU_ACTIVE_PERCENTAGE,
+   OA_VS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_VS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_VS_THREAD_CYCLES,
+
+   OA_HS_EU_ACTIVE_PERCENTAGE,
+   OA_HS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_HS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_HS_THREAD_CYCLES,
+
+   OA_DS_EU_ACTIVE_PERCENTAGE,
+   OA_DS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_DS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_DS_THREAD_CYCLES,
+
+   OA_CS_EU_ACTIVE_PERCENTAGE,
+   OA_CS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_CS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_CS_THREAD_CYCLES,
+
+   OA_GS_EU_ACTIVE_PERCENTAGE,
+   OA_GS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_GS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_GS_THREAD_CYCLES,
+
+   OA_PS_EU_ACTIVE_PERCENTAGE,
+   OA_PS_EU_STALLED_PERCENTAGE,
+   OA_AVERAGE_PS_THREAD_CYCLES,
+   OA_AVERAGE_STALLED_PS_THREAD_CYCLES,
+
+   MAX_OA_COUNTERS
+};
+
+struct brw_oa_counter {
+   const char *name;
+   enum brw_oa_counter_id id;
+   int report_offset;
+   int config;
+   void (*accumulate)(struct brw_oa_counter *counter,
+                      uint32_t *start,
+                      uint32_t *end,
+                      uint64_t *accumulator);
+   uint64_t (*read)(struct brw_oa_counter *counter,
+                    uint32_t *start,
+                    uint32_t *end,
+                    uint64_t *accumulated);
+};
 
 /**
  * brw_context is derived from gl_context.
@@ -1322,8 +1429,24 @@ struct brw_context
       /** A map from pipeline statistics counter IDs to MMIO addresses. */
       const int *statistics_registers;
 
-      /** The number of active monitors using OA counters. */
-      unsigned oa_users;
+      /* Meta data for each OA counter, such as corresponding snapshot
+       * offsets for raw counter values, and callbacks for accumulating
+       * deltas and deriving normalized values */
+      struct brw_oa_counter oa_counters[MAX_OA_COUNTERS];
+
+      /* The number of useful OA based counters being exposed */
+      int n_exposed_oa_counters;
+
+      /* The i915_oa perf event we open to setup + enable the OA counters */
+      int perf_oa_event_fd;
+
+      /** The number of monitors pending closure in brw_end_perf_monitor() */
+      int open_oa_monitors;
+
+      /* The number of monitors depending on running OA counters which
+       * extends beyond brw_end_perf_monitor() since we need to wait until
+       * the last MI_RPC command has been written. */
+      int oa_users;
 
       /**
        * A buffer object storing OA counter snapshots taken at the start and
@@ -1345,11 +1468,9 @@ struct brw_context
       int unresolved_elements;
       int unresolved_array_size;
 
-      /**
-       * Mapping from a uint32_t offset within an OA snapshot to the ID of
-       * the counter which MI_REPORT_PERF_COUNT stores there.
-       */
-      const int *oa_snapshot_layout;
+      /* Maps from ARB_performance_monitor counter ids (offsets) to oa
+       * counter ids */
+      enum brw_oa_counter_id *oa_counter_map;
 
       /** Number of 32-bit entries in a hardware counter snapshot. */
       int entries_per_oa_snapshot;
@@ -1610,6 +1731,7 @@ uint32_t brw_depth_format(struct brw_context *brw, mesa_format format);
 
 /* brw_performance_monitor.c */
 void brw_init_performance_monitors(struct brw_context *brw);
+void brw_destroy_performance_monitors(struct brw_context *brw);
 void brw_dump_perf_monitors(struct brw_context *brw);
 void brw_perf_monitor_new_batch(struct brw_context *brw);
 void brw_perf_monitor_finish_batch(struct brw_context *brw);
