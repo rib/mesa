@@ -1031,6 +1031,9 @@ struct brw_oa_counter {
                     uint64_t *accumulated);
 };
 
+/* XXX: find a better home for this constant */
+#define MAX_OA_SNAPSHOT_LEN 64
+
 /**
  * brw_context is derived from gl_context.
  */
@@ -1449,13 +1452,24 @@ struct brw_context
       int oa_users;
 
       /**
-       * A buffer object storing OA counter snapshots taken at the start and
-       * end of each batch (creating "bookends" around the batch).
+       * A buffer object storing OA counter snapshots taken at the start of
+       * each batch.
+       *
+       * TODO: rename. "bookend" is a misnomer now that we don't also take
+       * snapshots at the end of each batch too.
        */
       drm_intel_bo *bookend_bo;
 
       /** The number of snapshots written to bookend_bo. */
-      int bookend_snapshots;
+      int n_bookend_snapshots;
+
+      /**
+       * Sometimes we gather snapshots while there are open monitors and we
+       * save a copy of the last snapshot we gather so we can recycle the
+       * bookend BO but keep a reference point for gathering further
+       * snapshots later.
+       */
+      uint32_t gather_continue_snapshot[MAX_OA_SNAPSHOT_LEN];
 
       /**
        * An array of monitors whose results haven't yet been assembled based on
