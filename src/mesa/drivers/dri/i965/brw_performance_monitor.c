@@ -1225,7 +1225,13 @@ brw_get_perf_monitor_result(struct gl_context *ctx,
             /* TODO: Enable floating point precision instead of casting an int */
             *((float *)p) =
                counter->read(counter, start, end, monitor->oa_accumulator);
-            fprintf(stderr, "DEBUG PERCENTAGE: %s = %f\n", gl_counter->Name, *((float *)p));
+#if 0
+            fprintf(stderr, "DEBUG PERCENTAGE: %20s = %3d: raw ref counter = %-3d delta=%-12"PRIu64 " start=%-11"PRIu32 " end=%-11"PRIu32"\n",
+                    gl_counter->Name, (int)*((float *)p),
+                    counter->report_offset,
+                    monitor->oa_accumulator[counter->id],
+                    start[counter->report_offset], end[counter->report_offset]);
+#endif
             p += 4;
             break;
          case GL_UNSIGNED_INT64_AMD:
@@ -1269,7 +1275,7 @@ brw_get_perf_monitor_result(struct gl_context *ctx,
    }
 
    if (bytes_written)
-      *bytes_written = offset * sizeof(uint32_t);
+      *bytes_written = p - (uint8_t *)data;
 }
 
 /**
