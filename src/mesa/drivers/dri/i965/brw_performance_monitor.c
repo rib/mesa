@@ -121,19 +121,23 @@ struct brw_perf_monitor_object
 };
 
 /* attr.config */
-enum i915_perf_oa_report_format {
-   I915_PERF_OA_FORMAT_A13_HSW =       0,
-   I915_PERF_OA_FORMAT_A29_HSW =       1,
-   I915_PERF_OA_FORMAT_A13_B8_C8_HSW = 2,
-   I915_PERF_OA_FORMAT_A29_B8_C8_HSW = 3,
-   I915_PERF_OA_FORMAT_B4_C8_HSW =     4,
-   I915_PERF_OA_FORMAT_A45_B8_C8_HSW = 5,
-   I915_PERF_OA_FORMAT_B4_C8_A16_HSW = 6,
-   I915_PERF_OA_FORMAT_C4_B8_HSW =     7
-};
 
-/* attr.config1 */
-#define I915_PERF_OA_SINGLE_CONTEXT_ENABLE  1
+#define I915_PERF_OA_CTX_ID_MASK	    0xffffffff
+#define I915_PERF_OA_SINGLE_CONTEXT_ENABLE  (1ULL << 32)
+
+#define I915_PERF_OA_FORMAT_SHIFT	    33
+#define I915_PERF_OA_FORMAT_MASK	    (0x7ULL << 33)
+#define I915_PERF_OA_FORMAT_A13_HSW	    (0ULL << 33)
+#define I915_PERF_OA_FORMAT_A29_HSW	    (1ULL << 33)
+#define I915_PERF_OA_FORMAT_A13_B8_C8_HSW   (2ULL << 33)
+#define I915_PERF_OA_FORMAT_A29_B8_C8_HSW   (3ULL << 33)
+#define I915_PERF_OA_FORMAT_B4_C8_HSW	    (4ULL << 33)
+#define I915_PERF_OA_FORMAT_A45_B8_C8_HSW   (5ULL << 33)
+#define I915_PERF_OA_FORMAT_B4_C8_A16_HSW   (6ULL << 33)
+#define I915_PERF_OA_FORMAT_C4_B8_HSW	    (7ULL << 33)
+
+#define I915_PERF_OA_TIMER_EXPONENT_SHIFT   36
+#define I915_PERF_OA_TIMER_EXPONENT_MASK    (0x3fULL << 36)
 
 /* FIXME: HACK to dig out the context id from the
  * otherwise opaque drm_intel_context struct! */
@@ -907,8 +911,9 @@ perf_event_open (struct perf_event_attr *hw_event,
 }
 
 static int
-open_i915_oa_event (enum i915_perf_oa_report_format report_format,
-                    bool single_context,
+open_i915_oa_event (uint64_t report_format,
+                    int period_exponent,
+                    int drm_fd,
                     uint32_t ctx_id)
 {
    struct perf_event_attr attr;
@@ -917,18 +922,20 @@ open_i915_oa_event (enum i915_perf_oa_report_format report_format,
    memset(&attr, 0, sizeof (struct perf_event_attr));
    attr.size = sizeof (struct perf_event_attr);
    attr.type = lookup_i915_oa_id();
-   attr.config = report_format;
 
-   attr.config1 = 0;
-   if (single_context)
-      attr.config1 |= I915_PERF_OA_SINGLE_CONTEXT_ENABLE | (ctx_id<<1);
+   attr.config |= report_format;
+   attr.config |= (uint64_t)period_exponent << I915_PERF_OA_TIMER_EXPONENT_SHIFT;
+
+   attr.config |= I915_PERF_OA_SINGLE_CONTEXT_ENABLE;
+   attr.config |= ctx_id & I915_PERF_OA_CTX_ID_MASK;
+   attr.config1 = drm_fd;
 
    attr.sample_type = PERF_SAMPLE_TIME | PERF_SAMPLE_READ | PERF_SAMPLE_RAW;
    attr.disabled = 1;
-   attr.sample_period = 1;
+   attr.sample_period = 0;
 
    //To avoid needing CAP_SYS_ADMIN...
-   attr.exclude_kernel = 1;
+   //attr.exclude_kernel = 1;
 
    event_fd = perf_event_open(&attr,
                               -1,  /* pid */
@@ -993,9 +1000,32 @@ brw_begin_perf_monitor(struct gl_context *ctx,
    if (monitor_needs_oa(brw, m)) {
       /* If the OA counters aren't already on, enable them. */
       if (brw->perfmon.perf_oa_event_fd == -1) {
-         int fd = open_i915_oa_event(I915_PERF_OA_FORMAT_A45_B8_C8_HSW,
-                                     true, /* profile single ctx */
-                                     brw->hw_ctx->ctx_id);
+         __DRIscreen *screen = brw->intelScreen->driScrnPriv;
+         int period_exponent;
+         int fd;
+
+         /* The timestamp for HSW+ increments every 80ns
+          *
+          * The period_exponent gives a sampling period as follows:
+          *   sample_period = 80ns * 2^(period_exponent + 1)
+          *
+          * FIXME: we need to choose a short enough period to catch
+          * counters wrapping.
+          *
+          * The overflow period for Haswell can be calculated as:
+          *
+          * 2^32 / (n_eus * max_gen_freq * 2)
+          * (E.g. 40 EUs @ 1GHz = ~53ms)
+          *
+          * Currently we just sample ~ every 5 milliseconds...
+          */
+         //period_exponent = 15;
+         period_exponent = 18;
+
+         fd = open_i915_oa_event(I915_PERF_OA_FORMAT_A45_B8_C8_HSW,
+                                 period_exponent,
+                                 screen->fd, /* drm fd */
+                                 brw->hw_ctx->ctx_id);
          if (fd == -1)
             return GL_FALSE; /* XXX: do we need to set GL error state? */
 
