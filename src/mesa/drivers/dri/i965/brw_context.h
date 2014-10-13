@@ -1460,6 +1460,16 @@ struct brw_context
        */
       drm_intel_bo *bookend_bo;
 
+      /* To verify that a report has been written we get the gpu to write
+       * out a unique ID with each bookend-bo snapshot. */
+      int next_bookend_bo_write_id;
+      int next_bookend_bo_read_id;
+
+      /* We also get the gpu to write an ID for snapshots corresponding
+       * to the beginning and end of a query, but for simplicity these
+       * IDs use a separate namespace. */
+      int next_query_start_report_id;
+
       /** The number of snapshots written to bookend_bo. */
       int n_bookend_snapshots;
 

@@ -79,6 +79,7 @@ struct brw_perf_monitor_object
     * BO containing OA counter snapshots at monitor Begin/End time.
     */
    drm_intel_bo *oa_bo;
+   int current_report_id;
 
    /**
     * snapshots [bookend_snapshots_begin, bookend_snapshots_end) within
@@ -154,9 +155,6 @@ brw_perf_monitor(struct gl_perf_monitor_object *m)
 }
 
 #define SECOND_SNAPSHOT_OFFSET_IN_BYTES 2048
-
-/* A random value used to ensure we're getting valid snapshots. */
-#define REPORT_ID 0xd2e9c607
 
 /******************************************************************************/
 
@@ -694,6 +692,8 @@ accumulate_oa_snapshots(struct brw_context *brw,
                         uint32_t *bookend_buffer)
 {
    struct gl_perf_monitor_object *m = &monitor->base;
+   int expected_start_id;
+   int expected_end_id;
 
    assert(!monitor->resolved);
    assert(monitor->oa_bo != NULL);
@@ -714,21 +714,28 @@ accumulate_oa_snapshots(struct brw_context *brw,
       uint32_t *start;
       uint32_t *end;
 
-      /* If we've accumulated any partial results, because we ran out of
-       * space in bookend_bo then we need to refer to
+      /* If we've accumulated any partial results (because we ran out of
+       * space in bookend_bo) then we need to refer to
        * perfmon.gather_continue_snapshot[] for our next delta...
        */
       if (monitor->accumulated) {
          assert(monitor->bookend_snapshots_begin == 0);
+
          start = brw->perfmon.gather_continue_snapshot;
+         expected_start_id = start[0];
+
          end = bookend_buffer;
+         expected_end_id = brw->perfmon.next_bookend_bo_read_id;
       } else {
          start = monitor_buffer;
-         end = bookend_buffer + snapshot_size * monitor->bookend_snapshots_begin;
+         expected_start_id = monitor->current_report_id;
 
-         if (start[0] != REPORT_ID) {
-            //fprintf(stderr, "Monitor's beginning OA report was lost!");
+         end = bookend_buffer + snapshot_size * monitor->bookend_snapshots_begin;
+         expected_end_id = brw->perfmon.next_bookend_bo_read_id;
+
+         if (start[0] != expected_start_id) {
             start = end;
+            expected_start_id = expected_end_id;
          }
       }
 
@@ -739,15 +746,15 @@ accumulate_oa_snapshots(struct brw_context *brw,
           * assume it's fine to ignore the missing snapshot since it implies
           * that there would be no significant delta between the snapshots
           * so we aren't going to miss a counter wrapping.
-          *
-          * XXX: consider using a dynamic report id to avoid false-positives
-          * here when recycling bookend_bo.
           */
-         if (start[0] == REPORT_ID && end[0] == REPORT_ID)
+         if (start[0] == expected_start_id && end[0] == expected_end_id)
             add_deltas(brw, monitor, start, end);
 
          start = end;
+         expected_start_id = expected_end_id;
+
          end += snapshot_size;
+         expected_end_id = ++brw->perfmon.next_bookend_bo_read_id;
       }
    }
 
@@ -760,18 +767,19 @@ accumulate_oa_snapshots(struct brw_context *brw,
       if (n_be_snapshots) {
          /* Use last snapshot accumulated above */
          start = bookend_buffer + snapshot_size * (monitor->bookend_snapshots_end - 1);
+         /* Note: we can keep expected_start_id as set above */
       } else if (monitor->accumulated) {
          start = brw->perfmon.gather_continue_snapshot;
+         expected_start_id = start[0];
       } else {
          start = monitor_buffer;
+         expected_start_id = monitor->current_report_id;
       }
 
-      if (end[0] != REPORT_ID) {
-         fprintf(stderr, "Monitor's end OA report was lost!");
+      if (end[0] != (monitor->current_report_id + 1))
          end = start;
-      }
 
-      if (start[0] == REPORT_ID && end[0] == REPORT_ID)
+      if (start[0] == expected_start_id)
          add_deltas(brw, monitor, start, end);
 
       monitor->resolved = true;
@@ -870,7 +878,7 @@ emit_bookend_snapshot(struct brw_context *brw)
    int offset_in_bytes = brw->perfmon.n_bookend_snapshots * snapshot_bytes;
 
    emit_mi_report_perf_count(brw, brw->perfmon.bookend_bo, offset_in_bytes,
-                             REPORT_ID);
+                             brw->perfmon.next_bookend_bo_write_id++);
    ++brw->perfmon.n_bookend_snapshots;
 }
 
@@ -961,6 +969,8 @@ reinitialize_perf_monitor(struct brw_context *brw,
       drm_intel_bo_unreference(monitor->oa_bo);
       monitor->oa_bo = NULL;
    }
+   monitor->current_report_id = brw->perfmon.next_query_start_report_id;
+   brw->perfmon.next_query_start_report_id += 2;
 
    /* Since the results are now invalid, we don't need to hold on to any
     * snapshots in bookend_bo.  The monitor is effectively "resolved."
@@ -1054,12 +1064,13 @@ brw_begin_perf_monitor(struct gl_context *ctx,
 #ifdef DEBUG
       /* Pre-filling the BO helps debug whether writes landed. */
       drm_intel_bo_map(monitor->oa_bo, true);
-      memset((char *) monitor->oa_bo->virtual, 0xff, 4096);
+      memset((char *) monitor->oa_bo->virtual, 0x80, 4096);
       drm_intel_bo_unmap(monitor->oa_bo);
 #endif
 
       /* Take a starting OA counter snapshot. */
-      emit_mi_report_perf_count(brw, monitor->oa_bo, 0, REPORT_ID);
+      emit_mi_report_perf_count(brw, monitor->oa_bo, 0,
+                                monitor->current_report_id);
 
       /* Add the monitor to the unresolved list. */
       add_to_unresolved_monitor_list(brw, monitor);
@@ -1094,7 +1105,8 @@ brw_end_perf_monitor(struct gl_context *ctx,
    if (monitor_needs_oa(brw, m)) {
       /* Take an ending OA counter snapshot. */
       emit_mi_report_perf_count(brw, monitor->oa_bo,
-                                SECOND_SNAPSHOT_OFFSET_IN_BYTES, REPORT_ID);
+                                SECOND_SNAPSHOT_OFFSET_IN_BYTES,
+                                monitor->current_report_id + 1);
 
       --brw->perfmon.open_oa_monitors;
 
@@ -1179,13 +1191,6 @@ brw_get_perf_monitor_result(struct gl_context *ctx,
 
    /* This hook should only be called when results are available. */
    assert(m->Ended);
-
-   /* Copy data to the supplied array (data).
-    *
-    * The output data format is: <group ID, counter ID, value> for each
-    * active counter.  The API allows counters to appear in any order.
-    */
-   GLsizei offset = 0;
 
    if (monitor_needs_oa(brw, m)) {
       int n_oa_counters = ctx->PerfMonitor.Groups[OA_COUNTERS].NumCounters;
@@ -1749,6 +1754,11 @@ brw_init_performance_monitors(struct brw_context *brw)
 
    memset(brw->perfmon.oa_counters, 0, sizeof(brw->perfmon.oa_counters));
    init_hsw_oa_counters(brw);
+
+   brw->perfmon.next_bookend_bo_read_id = 1000000;
+   brw->perfmon.next_bookend_bo_write_id = 1000000;
+
+   brw->perfmon.next_query_start_report_id = 1000;
 
    eu_count = get_eu_count(brw->intelScreen->deviceID);
 }
