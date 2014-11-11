@@ -501,31 +501,7 @@ emit_mi_report_perf_count(struct brw_context *brw,
    /* Reports apparently don't always get written unless we flush first. */
    intel_batchbuffer_emit_mi_flush(brw);
 
-   if (brw->gen == 5) {
-      /* Ironlake requires two MI_REPORT_PERF_COUNT commands to write all
-       * the counters.  The report ID is ignored in the second set.
-       */
-      BEGIN_BATCH(6);
-      OUT_BATCH(GEN5_MI_REPORT_PERF_COUNT | GEN5_MI_COUNTER_SET_0);
-      OUT_RELOC(bo,
-                I915_GEM_DOMAIN_INSTRUCTION, I915_GEM_DOMAIN_INSTRUCTION,
-                offset_in_bytes);
-      OUT_BATCH(report_id);
-
-      OUT_BATCH(GEN5_MI_REPORT_PERF_COUNT | GEN5_MI_COUNTER_SET_1);
-      OUT_RELOC(bo,
-                I915_GEM_DOMAIN_INSTRUCTION, I915_GEM_DOMAIN_INSTRUCTION,
-                offset_in_bytes + 64);
-      OUT_BATCH(report_id);
-      ADVANCE_BATCH();
-   } else if (brw->gen == 6) {
-      BEGIN_BATCH(3);
-      OUT_BATCH(GEN6_MI_REPORT_PERF_COUNT);
-      OUT_RELOC(bo, I915_GEM_DOMAIN_INSTRUCTION, I915_GEM_DOMAIN_INSTRUCTION,
-                offset_in_bytes | MI_COUNTER_ADDRESS_GTT);
-      OUT_BATCH(report_id);
-      ADVANCE_BATCH();
-   } else if (brw->gen == 7) {
+   if (brw->gen == 7) {
       BEGIN_BATCH(3);
       OUT_BATCH(GEN6_MI_REPORT_PERF_COUNT);
       OUT_RELOC(bo, I915_GEM_DOMAIN_INSTRUCTION, I915_GEM_DOMAIN_INSTRUCTION,
