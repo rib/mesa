@@ -509,7 +509,7 @@ emit_mi_report_perf_count(struct brw_context *brw,
       OUT_BATCH(report_id);
       ADVANCE_BATCH();
    } else {
-      unreachable("Unsupported generation for performance counters.");
+      unreachable("Unsupported generation for OA performance counters.");
    }
 
    /* Reports apparently don't always get written unless we flush after. */
