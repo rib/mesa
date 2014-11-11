@@ -578,12 +578,17 @@ drop_from_unresolved_monitor_list(struct brw_context *brw,
 static int
 get_eu_count(uint32_t devid)
 {
-   if (IS_HSW_GT1(devid))
+   const struct brw_device_info *info = brw_get_device_info(devid);
+
+   assert(info && info->is_haswell);
+
+   if (info->gt == 1)
       return 10;
-   if (IS_HSW_GT2(devid))
+   else if (info->gt == 2)
       return 20;
-   if (IS_HSW_GT3(devid))
+   else if (info->gt == 3)
       return 40;
+
    assert(0);
 }
 
