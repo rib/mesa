@@ -1443,6 +1443,14 @@ struct brw_context
       /* The i915_oa perf event we open to setup + enable the OA counters */
       int perf_oa_event_fd;
 
+      /* The mmaped circular buffer for collecting samples from perf */
+      void *perf_oa_mmap_base;
+      size_t perf_oa_buffer_size;
+      struct perf_event_mmap_page *perf_oa_mmap_page;
+
+      /* The system's page size */
+      unsigned int page_size;
+
       /** The number of monitors pending closure in brw_end_perf_monitor() */
       int open_oa_monitors;
 
@@ -1451,35 +1459,10 @@ struct brw_context
        * the last MI_RPC command has been written. */
       int oa_users;
 
-      /**
-       * A buffer object storing OA counter snapshots taken at the start of
-       * each batch.
-       *
-       * TODO: rename. "bookend" is a misnomer now that we don't also take
-       * snapshots at the end of each batch too.
-       */
-      drm_intel_bo *bookend_bo;
-
-      /* To verify that a report has been written we get the gpu to write
-       * out a unique ID with each bookend-bo snapshot. */
-      int next_bookend_bo_write_id;
-      int next_bookend_bo_read_id;
-
       /* We also get the gpu to write an ID for snapshots corresponding
        * to the beginning and end of a query, but for simplicity these
        * IDs use a separate namespace. */
       int next_query_start_report_id;
-
-      /** The number of snapshots written to bookend_bo. */
-      int n_bookend_snapshots;
-
-      /**
-       * Sometimes we gather snapshots while there are open monitors and we
-       * save a copy of the last snapshot we gather so we can recycle the
-       * bookend BO but keep a reference point for gathering further
-       * snapshots later.
-       */
-      uint32_t gather_continue_snapshot[MAX_OA_SNAPSHOT_LEN];
 
       /**
        * An array of monitors whose results haven't yet been assembled based on

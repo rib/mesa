@@ -82,26 +82,26 @@ struct brw_perf_monitor_object
    int current_report_id;
 
    /**
-    * snapshots [bookend_snapshots_begin, bookend_snapshots_end) within
-    * perfmon->bookend_bo belong to this monitor and should be accumulated
-    * at the end of monitoring.
+    * We collect periodic counter snapshots via perf so we can account
+    * for counter overflow and this is a pointer into the circular
+    * perf buffer for collecting snapshots that lie within the begin-end
+    * bounds of this monitor.
     */
-   int bookend_snapshots_begin;
-   int bookend_snapshots_end;
+   uint64_t oa_tail;
 
    /**
     * Storage for OA results accumulated so far.
     *
     * An array indexed by the counter ID in the brw_oa_counter_id enum.
     *
-    * When we run out of space in bookend_bo, we accumulate the deltas
-    * accrued so far and add them to the value stored here.  Then, we
-    * can discard bookend_bo.
+    * XXX: We can possibly get rid of this if we don't can any
+    * exceptional condition for triggering a partial accumulation of
+    * results. (previously we would accumulate if we ran out of space
+    * in bookend_bo) We could hit problems with overflowing the perf
+    * circular buffer, but maybe for those cases we can instead simply
+    * report an error with the counters?
     */
    uint64_t oa_accumulator[MAX_OA_COUNTERS];
-
-   /** Indicates whether any snapshots have been accumulated yet */
-   bool accumulated;
 
    /**
     * false while in the unresolved_elements list, and set to true when
@@ -120,6 +120,37 @@ struct brw_perf_monitor_object
     */
    uint64_t *pipeline_stats_results;
 };
+
+/* Samples read from the perf circular buffer */
+struct oa_perf_sample {
+   struct perf_event_header header;
+   uint64_t time; /* PERF_SAMPLE_TIME */
+   uint64_t value; /* PERF_SAMPLE_READ */
+   uint32_t raw_size;
+   uint8_t raw_data[];
+};
+#define MAX_OA_PERF_SAMPLE_SIZE (8 +   /* perf_event_header */       \
+                                 8 +   /* time: TODO remove */       \
+                                 8 +   /* value: TODO remove */      \
+                                 4 +   /* raw_size */                \
+                                 256 + /* raw OA counter snapshot */ \
+                                 4)    /* alignment padding */
+
+#define TAKEN(HEAD, TAIL, POT_SIZE)	(((HEAD) - (TAIL)) & (POT_SIZE - 1))
+
+/* Note: this will equate to 0 when the buffer is exactly full... */
+#define REMAINING(HEAD, TAIL, POT_SIZE) (POT_SIZE - TAKEN (HEAD, TAIL, POT_SIZE))
+
+#if defined(__i386__)
+#define rmb()           __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
+#define wmb()           __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
+#endif
+
+#if defined(__x86_64__)
+#define rmb()           __asm__ volatile("lfence" ::: "memory")
+#define wmb()           __asm__ volatile("sfence" ::: "memory")
+#endif
+
 
 /* attr.config */
 
@@ -371,14 +402,12 @@ dump_perf_monitor_callback(GLuint name, void *monitor_void, void *brw_void)
 
    const char *resolved = monitor->resolved ? "Resolved" : "";
 
-   DBG("%4d  %-7s %-6s %-10s %-11s <%3d, %3d>  %-6s %-9s\n",
+   DBG("%4d  %-7s %-6s %-10s %-11s %-6s %-9s\n",
        name,
        m->Active ? "Active" : "",
        m->Ended ? "Ended" : "",
        resolved,
        brw_is_perf_monitor_result_available(ctx, m) ? "Available" : "",
-       monitor->bookend_snapshots_begin,
-       monitor->bookend_snapshots_end,
        monitor->oa_bo ? "OA BO" : "",
        monitor->pipeline_stats_bo ? "Stats BO" : "");
 }
@@ -522,12 +551,9 @@ emit_mi_report_perf_count(struct brw_context *brw,
 /**
  * Add a monitor to the global list of "unresolved monitors."
  *
- * Monitors are "unresolved" until the end MI_RPC OA counter snapshot has
- * been accumulated.
- *
- * Any monitors listed here may depend on counter snapshots within
- * bookend_bo, so if we run out of space we must iterate these monitors
- * to accumulate partial results before it's save to recycle bookend_bo.
+ * Monitors are "unresolved" until all the counter snapshots have been
+ * accumulated via accumulate_oa_snapshots() after the end MI_REPORT_PERF_COUNT
+ * has landed in monitor->oa_bo.
  */
 static void
 add_to_unresolved_monitor_list(struct brw_context *brw,
@@ -561,13 +587,6 @@ drop_from_unresolved_monitor_list(struct brw_context *brw,
             brw->perfmon.unresolved[i] = NULL;
          } else {
             brw->perfmon.unresolved[i] = brw->perfmon.unresolved[last_elt];
-         }
-
-         /* If there are no unresolved monitors left that implies we can
-          * recycle the bookend_bo, discarding any snapshots it held... */
-         if (brw->perfmon.unresolved_elements == 0) {
-            DBG("***Resetting bookend snapshots to 0\n");
-            brw->perfmon.n_bookend_snapshots = 0;
          }
          return;
       }
@@ -635,232 +654,173 @@ add_deltas(struct brw_context *brw,
               monitor->oa_accumulator[counter->id]);
 #endif
    }
-
-   monitor->accumulated = true;
 }
 
 /**
- * Accumulate OA counter results (partial or full) from a series of snapshots.
+ * Accumulate OA counter results from a series of snapshots.
  *
  * N.B. We write snapshots for the beginning and end of a monitor into
- * monitor->oa_bo as well as snapshots at the start of each batch between
- * those points (into brw->perfmon.bookend_bo).
+ * monitor->oa_bo as well as collect periodic snapshots from the Linux
+ * perf interface.
  *
- * These intermediate snapshots help to ensure we handle counter wrapping
+ * These periodic snapshots help to ensure we handle counter overflow
  * correctly by being frequent enough to ensure we don't miss multiple
- * wrap arounds of a counter between snapshots.
- *
- * Note: In the future we will likely switch to collecting intermediate
- * snapshots via perf instead of explicitly issuing intermediate MI_RPC
- * commands.
- *
- * Note bookend_bo can be shared by multiple overlapping monitor objects and
- * its possible for us to run out of space in this BO whereby we have to
- * accumulate partial results for all currently unresolved monitors so that
- * the buffer can be recycled.
- *
- * Since the process of accumulating snapshot results always refers to two
- * snapshots that we can calculate a delta between, then in the case that we
- * accumulate partial results it's necessary to save the last snapshot
- * read from bookend_bo to brw->perfmon.gather_continue_snapshotp[] to serve
- * as a reference point when we continue to accumulate results later.
- * (Actually capturing this snapshot is handled in wrap_bookend_bo(), but
- * we're careful to refer to it as necessary here.)
+ * wrap overflows of a counter between snapshots.
  */
 static void
 accumulate_oa_snapshots(struct brw_context *brw,
-                        struct brw_perf_monitor_object *monitor,
-                        uint32_t *bookend_buffer)
+                        struct brw_perf_monitor_object *monitor)
 {
    struct gl_perf_monitor_object *m = &monitor->base;
-   int expected_start_id;
-   int expected_end_id;
-
-   assert(!monitor->resolved);
-   assert(monitor->oa_bo != NULL);
-   assert(monitor->oa_bo->virtual != NULL);
-
    uint32_t *monitor_buffer = monitor->oa_bo->virtual;
+   uint8_t *data = brw->perfmon.perf_oa_mmap_base + brw->perfmon.page_size;
+   const unsigned int size = brw->perfmon.perf_oa_buffer_size;
+   const uint64_t mask = size - 1;
+   uint64_t head;
+   uint64_t tail;
+   uint64_t dummy_count;
+   uint32_t *start;
+   uint64_t start_timestamp;
+   uint32_t *last;
+   uint32_t *end;
+   uint64_t end_timestamp;
+   uint64_t straggler_tail;
+   int straggler_taken;
+   uint8_t scratch[MAX_OA_PERF_SAMPLE_SIZE];
 
-   const int snapshot_size = brw->perfmon.entries_per_oa_snapshot;
+   assert(m->Ended);
 
-   /* If we have any bookend snapshots then count the contribution of those
-    * first.
-    */
+   /* A well defined side effect of reading the sample count of
+    * an i915 OA event is that all outstanding counter reports
+    * will be flushed into the perf mmap buffer... */
+   read(brw->perfmon.perf_oa_event_fd, &dummy_count, 8);
 
-   int n_be_snapshots = (monitor->bookend_snapshots_end -
-                         monitor->bookend_snapshots_begin);
+   start = last = monitor_buffer;
+   end = monitor_buffer + (SECOND_SNAPSHOT_OFFSET_IN_BYTES / sizeof(uint32_t));
 
-   if (n_be_snapshots) {
-      uint32_t *start;
-      uint32_t *end;
+   /* XXX: Is there anything we can do to handle this gracefully/
+    * report the error to the application? */
+   if (start[0] != monitor->current_report_id)
+      DBG("Spurious start report id=%"PRIu32"\n", start[0]);
+   if (end[0] != (monitor->current_report_id + 1))
+      DBG("Spurious end report id=%"PRIu32"\n", start[0]);
 
-      /* If we've accumulated any partial results (because we ran out of
-       * space in bookend_bo) then we need to refer to
-       * perfmon.gather_continue_snapshot[] for our next delta...
-       */
-      if (monitor->accumulated) {
-         assert(monitor->bookend_snapshots_begin == 0);
+   start_timestamp = read_report_timestamp(brw, start);
+   end_timestamp = read_report_timestamp(brw, end);
 
-         start = brw->perfmon.gather_continue_snapshot;
-         expected_start_id = start[0];
+   head = brw->perfmon.perf_oa_mmap_page->data_head;
+   rmb();
 
-         end = bookend_buffer;
-         expected_end_id = brw->perfmon.next_bookend_bo_read_id;
-      } else {
-         start = monitor_buffer;
-         expected_start_id = monitor->current_report_id;
+   tail = monitor->oa_tail;
 
-         end = bookend_buffer + snapshot_size * monitor->bookend_snapshots_begin;
-         expected_end_id = brw->perfmon.next_bookend_bo_read_id;
+   //fprintf(stderr, "Handle event mask = 0x%" PRIx64
+   //        " head=%" PRIu64 " tail=%" PRIu64 "\n", mask, head, tail);
 
-         if (start[0] != expected_start_id) {
-            start = end;
-            expected_start_id = expected_end_id;
+   while (TAKEN(head, tail, size)) {
+      const struct perf_event_header *header =
+         (const struct perf_event_header *)(data + (tail & mask));
+
+      if (header->size == 0) {
+         DBG("Spurious header size == 0\n");
+         /* XXX: How should we handle this instead of exiting() */
+         exit(1);
+      }
+
+      if (header->size > (head - tail)) {
+         DBG("Spurious header size would overshoot head\n");
+         /* XXX: How should we handle this instead of exiting() */
+         exit(1);
+      }
+
+      //fprintf(stderr, "header = %p tail=%" PRIu64 " size=%d\n",
+      //        header, tail, header->size);
+
+      if ((const uint8_t *)header + header->size > data + size) {
+         int before;
+
+         if (header->size > MAX_OA_PERF_SAMPLE_SIZE) {
+            DBG("Skipping spurious sample larger than expected\n");
+            tail += header->size;
+            continue;
          }
+
+         before = data + size - (const uint8_t *)header;
+
+         memcpy(scratch, header, before);
+         memcpy(scratch + before, data, header->size - before);
+
+         header = (struct perf_event_header *)scratch;
+         //fprintf(stderr, "DEBUG: split\n");
+         //exit(1);
       }
 
-      for (int i = 0; i < n_be_snapshots; i++) {
+      switch (header->type) {
+         case PERF_RECORD_LOST: {
+            struct {
+               struct perf_event_header header;
+               uint64_t id;
+               uint64_t n_lost;
+            } *lost = (void *)header;
+            DBG("i915_oa: Lost %" PRIu64 " events\n", lost->n_lost);
+            break;
+         }
 
-         /* It's possible that the MI_RPC snapshot was lost if it collided
-          * with a previous, in-flight MI_RPC command. In this case we
-          * assume it's fine to ignore the missing snapshot since it implies
-          * that there would be no significant delta between the snapshots
-          * so we aren't going to miss a counter wrapping.
-          */
-         if (start[0] == expected_start_id && end[0] == expected_end_id)
-            add_deltas(brw, monitor, start, end);
+         case PERF_RECORD_THROTTLE:
+            DBG("i915_oa: Sampling has been throttled\n");
+            break;
 
-         start = end;
-         expected_start_id = expected_end_id;
+         case PERF_RECORD_UNTHROTTLE:
+            DBG("i915_oa: Sampling has been unthrottled\n");
+            break;
 
-         end += snapshot_size;
-         expected_end_id = ++brw->perfmon.next_bookend_bo_read_id;
+         case PERF_RECORD_SAMPLE: {
+            struct oa_perf_sample *perf_sample = (struct oa_perf_sample *)header;
+            uint32_t *report = (uint32_t *)perf_sample->raw_data;
+            uint64_t timestamp = read_report_timestamp(brw, report);
+
+            if (timestamp >= end_timestamp)
+               goto end;
+
+            if (timestamp > start_timestamp) {
+               add_deltas(brw, monitor, last, report);
+               last = report;
+            }
+
+            break;
+         }
+
+         default:
+            DBG("i915_oa: Spurious header type = %d\n", header->type);
       }
+
+      //fprintf(stderr, "Tail += %d\n", header->size);
+
+      tail += header->size;
    }
 
-   /* Resolve the monitor and accumulate the end snapshot if possible... */
-   if (m->Ended) {
-      uint32_t *start;
-      uint32_t *end = monitor_buffer + (SECOND_SNAPSHOT_OFFSET_IN_BYTES /
-                                        sizeof(uint32_t));
+end:
 
-      if (n_be_snapshots) {
-         /* Use last snapshot accumulated above */
-         start = bookend_buffer + snapshot_size * (monitor->bookend_snapshots_end - 1);
-         /* Note: we can keep expected_start_id as set above */
-      } else if (monitor->accumulated) {
-         start = brw->perfmon.gather_continue_snapshot;
-         expected_start_id = start[0];
-      } else {
-         start = monitor_buffer;
-         expected_start_id = monitor->current_report_id;
-      }
+   add_deltas(brw, monitor, last, end);
 
-      if (end[0] != (monitor->current_report_id + 1))
-         end = start;
+   DBG("Marking %d resolved - results gathered\n", m->Name);
+   monitor->resolved = true;
+   drop_from_unresolved_monitor_list(brw, monitor);
 
-      if (start[0] == expected_start_id)
-         add_deltas(brw, monitor, start, end);
+   straggler_taken = 0;
+   straggler_tail = head;
 
-      monitor->resolved = true;
-
-      /* The monitor's OA result is now resolved. */
-      DBG("Marking %d resolved - results gathered\n", m->Name);
-      drop_from_unresolved_monitor_list(brw, monitor);
-   }
-}
-
-/**
- * Handle running out of space in the bookend BO.
- *
- * When we run out of space in the bookend BO, we need to gather up partial
- * results for every unresolved monitor.  This allows us to free the snapshot
- * data in bookend_bo, freeing up the space for reuse.  We call this "wrapping."
- *
- * This will completely compute the result for any unresolved monitors that
- * have ended.
- */
-static void
-wrap_bookend_bo(struct brw_context *brw)
-{
-   DBG("****Wrap bookend BO****\n");
-
-   /* Note that wrapping will only occur at the start of a batch, since that's
-    * where we reserve space.  So the current batch won't reference bookend_bo
-    * or any monitor BOs.  This means we don't need to worry about
-    * synchronization.
-    */
-   assert(brw->perfmon.oa_users > 0);
-
-   drm_intel_bo_map(brw->perfmon.bookend_bo, false);
-   uint32_t *bookend_buffer = brw->perfmon.bookend_bo->virtual;
    for (int i = 0; i < brw->perfmon.unresolved_elements; i++) {
       struct brw_perf_monitor_object *monitor = brw->perfmon.unresolved[i];
-      struct gl_perf_monitor_object *m = &monitor->base;
+      int taken = TAKEN(head, monitor->oa_tail, size);
 
-      /* If the monitor has ended and we're just waiting for the last MI_RPC
-       * snapshot to land then we don't want to accumulate any bookend
-       * snapshots made after monitoring ended... */
-      if (!m->Ended)
-         monitor->bookend_snapshots_end = brw->perfmon.n_bookend_snapshots;
-
-      drm_intel_bo_map(monitor->oa_bo, false);
-      accumulate_oa_snapshots(brw, monitor, bookend_buffer);
-      drm_intel_bo_unmap(monitor->oa_bo);
-
-      monitor->bookend_snapshots_begin = 0;
-      monitor->bookend_snapshots_end = 0;
-
-      if (monitor->resolved) {
-         --i; /* account for modifying the list while iterating */
+      if (taken > straggler_taken) {
+         straggler_taken = taken;
+         straggler_tail = monitor->oa_tail;
       }
    }
 
-   const int snapshot_size = brw->perfmon.entries_per_oa_snapshot;
-
-   /* Since the process of accumulating snapshot results always refers to
-    * two snapshots that we can calculate a delta between, that means it's
-    * necessary to copy the last bookend_bo snapshot to
-    * brw->perfmon.gather_continue_snapshotp[] here to serve as a reference
-    * point when we continue to accumulate results later...
-    */
-   memcpy(brw->perfmon.gather_continue_snapshot,
-          bookend_buffer + snapshot_size * (brw->perfmon.n_bookend_snapshots - 1),
-          snapshot_size * sizeof(uint32_t));
-
-   drm_intel_bo_unmap(brw->perfmon.bookend_bo);
-
-   brw->perfmon.n_bookend_snapshots = 0;
-}
-
-/* This is fairly arbitrary; the trade off is memory usage vs. extra overhead
- * from wrapping.  On Gen7, 32768 should be enough for for 128 snapshots before
- * wrapping (since each is 256 bytes).
- */
-#define BOOKEND_BO_SIZE_BYTES 32768
-
-static bool
-has_space_for_bookend_snapshot(struct brw_context *brw)
-{
-   int snapshot_bytes = brw->perfmon.entries_per_oa_snapshot * sizeof(uint32_t);
-   int total_snapshots = brw->perfmon.n_bookend_snapshots + 1;
-
-   return total_snapshots * snapshot_bytes < BOOKEND_BO_SIZE_BYTES;
-}
-
-/**
- * Write an OA counter snapshot to bookend_bo.
- */
-static void
-emit_bookend_snapshot(struct brw_context *brw)
-{
-   int snapshot_bytes = brw->perfmon.entries_per_oa_snapshot * sizeof(uint32_t);
-   int offset_in_bytes = brw->perfmon.n_bookend_snapshots * snapshot_bytes;
-
-   emit_mi_report_perf_count(brw, brw->perfmon.bookend_bo, offset_in_bytes,
-                             brw->perfmon.next_bookend_bo_write_id++);
-   ++brw->perfmon.n_bookend_snapshots;
+   brw->perfmon.perf_oa_mmap_page->data_tail = straggler_tail;
+   wmb();
 }
 
 /******************************************************************************/
@@ -899,14 +859,16 @@ perf_event_open (struct perf_event_attr *hw_event,
    return syscall (__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
 }
 
-static int
-open_i915_oa_event (uint64_t report_format,
+static bool
+open_i915_oa_event (struct brw_context *brw,
+                    uint64_t report_format,
                     int period_exponent,
                     int drm_fd,
                     uint32_t ctx_id)
 {
    struct perf_event_attr attr;
    int event_fd;
+   void *mmap_base;
 
    memset(&attr, 0, sizeof (struct perf_event_attr));
    attr.size = sizeof (struct perf_event_attr);
@@ -923,20 +885,32 @@ open_i915_oa_event (uint64_t report_format,
    attr.disabled = 1;
    attr.sample_period = 0;
 
-   //To avoid needing CAP_SYS_ADMIN...
-   //attr.exclude_kernel = 1;
-
    event_fd = perf_event_open(&attr,
                               -1,  /* pid */
                               0, /* cpu */
                               -1, /* group fd */
                               PERF_FLAG_FD_CLOEXEC); /* flags */
    if (event_fd == -1) {
-      DBG("WARNING: Error opening i915_oa perf event: %m\n");
-      return -1;
+      DBG("Error opening i915_oa perf event: %m\n");
+      return false;
    }
 
-   return event_fd;
+   /* NB: A read-write mapping ensures the kernel will stop writing data when
+    * the buffer is full, and will report samples as lost. */
+   mmap_base = mmap(NULL,
+                    brw->perfmon.perf_oa_buffer_size + brw->perfmon.page_size,
+                    PROT_READ | PROT_WRITE, MAP_SHARED, event_fd, 0);
+   if (mmap_base == MAP_FAILED) {
+      DBG("Error mapping circular buffer, %m\n");
+      close (event_fd);
+      return false;
+   }
+
+   brw->perfmon.perf_oa_event_fd = event_fd;
+   brw->perfmon.perf_oa_mmap_base = mmap_base;
+   brw->perfmon.perf_oa_mmap_page = mmap_base;
+
+   return true;
 }
 
 /**
@@ -953,17 +927,12 @@ reinitialize_perf_monitor(struct brw_context *brw,
    monitor->current_report_id = brw->perfmon.next_query_start_report_id;
    brw->perfmon.next_query_start_report_id += 2;
 
-   /* Since the results are now invalid, we don't need to hold on to any
-    * snapshots in bookend_bo.  The monitor is effectively "resolved."
-    */
    drop_from_unresolved_monitor_list(brw, monitor);
    monitor->resolved = false;
 
-   monitor->bookend_snapshots_begin = brw->perfmon.n_bookend_snapshots;
-   monitor->bookend_snapshots_end = brw->perfmon.n_bookend_snapshots;
+   monitor->oa_tail = brw->perfmon.perf_oa_mmap_page->data_tail;
 
    memset(monitor->oa_accumulator, 0, sizeof(monitor->oa_accumulator));
-   monitor->accumulated = false;
 
    if (monitor->pipeline_stats_bo) {
       drm_intel_bo_unreference(monitor->pipeline_stats_bo);
@@ -993,34 +962,27 @@ brw_begin_perf_monitor(struct gl_context *ctx,
       if (brw->perfmon.perf_oa_event_fd == -1) {
          __DRIscreen *screen = brw->intelScreen->driScrnPriv;
          int period_exponent;
-         int fd;
 
          /* The timestamp for HSW+ increments every 80ns
           *
           * The period_exponent gives a sampling period as follows:
           *   sample_period = 80ns * 2^(period_exponent + 1)
           *
-          * FIXME: we need to choose a short enough period to catch
-          * counters wrapping.
-          *
           * The overflow period for Haswell can be calculated as:
           *
           * 2^32 / (n_eus * max_gen_freq * 2)
           * (E.g. 40 EUs @ 1GHz = ~53ms)
           *
-          * Currently we just sample ~ every 5 milliseconds...
+          * We currently sample every 42 milliseconds...
           */
-         //period_exponent = 15;
          period_exponent = 18;
 
-         fd = open_i915_oa_event(I915_PERF_OA_FORMAT_A45_B8_C8_HSW,
+         if (!open_i915_oa_event(brw,
+                                 I915_PERF_OA_FORMAT_A45_B8_C8_HSW,
                                  period_exponent,
                                  screen->fd, /* drm fd */
-                                 brw->hw_ctx->ctx_id);
-         if (fd == -1)
+                                 brw->hw_ctx->ctx_id))
             return GL_FALSE; /* XXX: do we need to set GL error state? */
-
-         brw->perfmon.perf_oa_event_fd = fd;
       }
 
       if (brw->perfmon.oa_users == 0 &&
@@ -1028,16 +990,6 @@ brw_begin_perf_monitor(struct gl_context *ctx,
       {
          DBG("WARNING: Error enabling i915_oa perf event: %m\n");
          return GL_FALSE; /* XXX: do we need to set GL error state? */
-      }
-
-      /* If the global OA bookend BO doesn't exist, allocate it.  This should
-       * only happen once, but we delay until BeginPerfMonitor time to avoid
-       * wasting memory for contexts that don't use performance monitors.
-       */
-      if (!brw->perfmon.bookend_bo) {
-         brw->perfmon.bookend_bo = drm_intel_bo_alloc(brw->bufmgr,
-                                                      "OA bookend BO",
-                                                      BOOKEND_BO_SIZE_BYTES, 64);
       }
 
       monitor->oa_bo =
@@ -1091,12 +1043,9 @@ brw_end_perf_monitor(struct gl_context *ctx,
 
       --brw->perfmon.open_oa_monitors;
 
-      /* Now that the monitor has ended, (but can't be resolved until we
-       * have read the last MI_RPC snapshot) we mark the last bookend
-       * snapshot associated with this monitor so we won't gather further
-       * snapshots that might be made before this monitor is resolved.
-       */
-      monitor->bookend_snapshots_end = brw->perfmon.n_bookend_snapshots;
+      /* NB: even though the monitor has now ended, it can't be resolved
+       * until the end MI_REPORT_PERF_COUNT snapshot has been written
+       * to monitor->oa_bo */
    }
 
    if (monitor_needs_statistics_registers(brw, m)) {
@@ -1178,24 +1127,8 @@ brw_get_perf_monitor_result(struct gl_context *ctx,
 
       drm_intel_bo_map(monitor->oa_bo, false);
 
-      if (!monitor->resolved) {
-         /* Since the result is available, all the necessary snapshots will
-          * have been written to the bookend BO.  If other monitors are
-          * active, the bookend BO may be busy or referenced by the current
-          * batch, but only for writing snapshots related to those other
-          * monitors which we don't care about.
-          *
-          * Using an unsynchronized mapping avoids stalling for an
-          * indeterminate amount of time.
-          */
-         drm_intel_gem_bo_map_unsynchronized(brw->perfmon.bookend_bo);
-
-         accumulate_oa_snapshots(brw, monitor, brw->perfmon.bookend_bo->virtual);
-
-         drm_intel_bo_unmap(brw->perfmon.bookend_bo);
-
-         assert(monitor->resolved);
-      }
+      accumulate_oa_snapshots(brw, monitor);
+      assert(monitor->resolved);
 
       /* Disabling the i915_oa event will effectively disable the OA
        * counters.  Note it's important to be sure there are no outstanding
@@ -1317,30 +1250,18 @@ brw_delete_perf_monitor(struct gl_context *ctx, struct gl_perf_monitor_object *m
 
 /******************************************************************************/
 
+/* TODO: we can remove both of these since we now collect intermediate
+ * OA counter snapshots for detecting counter overflow via the Linux
+ * perf interface instead...
+ */
+
 /**
  * Called at the start of every render ring batch.
- *
- * Enable OA counters and emit the "start of batchbuffer" bookend OA snapshot.
- * Since it's a new batch, there will be plenty of space for the commands.
  */
 void
 brw_perf_monitor_new_batch(struct brw_context *brw)
 {
-   assert(brw->batch.ring == RENDER_RING);
-   assert(brw->gen < 6 || brw->batch.used == 0);
-
-   if (brw->perfmon.open_oa_monitors == 0)
-      return;
-
-   /* Make sure bookend_bo has enough space for a pair of snapshots.  If
-    * not, "wrap" the BO: gather up any results so far, and start from the
-    * beginning of the buffer.
-    */
-   if (!has_space_for_bookend_snapshot(brw))
-      wrap_bookend_bo(brw);
-
-   DBG("Bookend Begin Snapshot (%d)\n", brw->perfmon.n_bookend_snapshots);
-   emit_bookend_snapshot(brw);
+   /* TODO: remove this unused hook */
 }
 
 /**
@@ -1349,19 +1270,7 @@ brw_perf_monitor_new_batch(struct brw_context *brw)
 void
 brw_perf_monitor_finish_batch(struct brw_context *brw)
 {
-   assert(brw->batch.ring == RENDER_RING);
-
-   /* TODO: remove this:
-    *
-    * We no longer capture a snapshot at the end of a BB since we assume
-    * that the end of one BB will be close enough to the start of the next
-    * that we won't accumulate a very significant delta and reducing the
-    * number of snapshots we request may help avoid MI_RPC collisions that
-    * can result in lost reports.
-    *
-    * Eventually, instead of requesting snapshots at BB boundaries we will
-    * collect the periodic snapshots from perf.
-    */
+   /* TODO: remove this unused hook */
 }
 
 /******************************************************************************/
@@ -1731,13 +1640,13 @@ brw_init_performance_monitors(struct brw_context *brw)
    brw->perfmon.unresolved_elements = 0;
    brw->perfmon.unresolved_array_size = 1;
 
+   brw->perfmon.page_size = sysconf(_SC_PAGE_SIZE);
+
    brw->perfmon.perf_oa_event_fd = -1;
+   brw->perfmon.perf_oa_buffer_size = 1024 * 1024; /* NB: must be power of two */
 
    memset(brw->perfmon.oa_counters, 0, sizeof(brw->perfmon.oa_counters));
    init_hsw_oa_counters(brw);
-
-   brw->perfmon.next_bookend_bo_read_id = 1000000;
-   brw->perfmon.next_bookend_bo_write_id = 1000000;
 
    brw->perfmon.next_query_start_report_id = 1000;
 
@@ -1748,9 +1657,15 @@ void
 brw_destroy_performance_monitors(struct brw_context *brw)
 {
    if (brw->perfmon.perf_oa_event_fd != -1) {
+      if (brw->perfmon.perf_oa_mmap_base) {
+         size_t mapping_len =
+            brw->perfmon.perf_oa_buffer_size + brw->perfmon.page_size;
+
+         munmap(brw->perfmon.perf_oa_mmap_base, mapping_len);
+         brw->perfmon.perf_oa_mmap_base = NULL;
+      }
+
       close(brw->perfmon.perf_oa_event_fd);
       brw->perfmon.perf_oa_event_fd = -1;
    }
-
-   /* FIXME: clean up bookend bo etc */
 }
