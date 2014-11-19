@@ -87,7 +87,7 @@ struct brw_perf_monitor_object
     * perf buffer for collecting snapshots that lie within the begin-end
     * bounds of this monitor.
     */
-   uint64_t oa_tail;
+   unsigned int oa_tail;
 
    /**
     * Storage for OA results accumulated so far.
@@ -143,13 +143,19 @@ struct oa_perf_sample {
 
 #if defined(__i386__)
 #define rmb()           __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
-#define wmb()           __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
+#define mb()            __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
 #endif
 
 #if defined(__x86_64__)
 #define rmb()           __asm__ volatile("lfence" ::: "memory")
-#define wmb()           __asm__ volatile("sfence" ::: "memory")
+#define mb()            __asm__ volatile("mfence" ::: "memory")
 #endif
+
+/* TODO: consider using <stdatomic.h> something like:
+ *
+ * #define rmb() atomic_thread_fence(memory_order_seq_consume)
+ * #define mb() atomic_thread_fence(memory_order_seq_cst)
+ */
 
 
 /* attr.config */
@@ -548,6 +554,50 @@ emit_mi_report_perf_count(struct brw_context *brw,
    assert(brw->batch.used - batch_used <= MI_REPORT_PERF_COUNT_BATCH_DWORDS * 4);
 }
 
+static unsigned int
+read_perf_head(struct perf_event_mmap_page *mmap_page)
+{
+   unsigned int head = (*(volatile uint64_t *)&mmap_page->data_head);
+   rmb();
+
+   return head;
+}
+
+static void
+write_perf_tail(struct perf_event_mmap_page *mmap_page,
+                unsigned int tail)
+{
+   /* Make sure we've finished reading all the sample data we
+    * we're consuming before updating the tail... */
+   mb();
+   mmap_page->data_tail = tail;
+}
+
+/* Update the real perf tail pointer according to the monitor tail that
+ * is currently furthest behind...
+ */
+static void
+update_perf_tail(struct brw_context *brw)
+{
+   unsigned int size = brw->perfmon.perf_oa_buffer_size;
+   unsigned int head = read_perf_head(brw->perfmon.perf_oa_mmap_page);
+   int straggler_taken = -1;
+   unsigned int straggler_tail;
+
+   for (int i = 0; i < brw->perfmon.unresolved_elements; i++) {
+      struct brw_perf_monitor_object *monitor = brw->perfmon.unresolved[i];
+      int taken = TAKEN(head, monitor->oa_tail, size);
+
+      if (taken > straggler_taken) {
+         straggler_taken = taken;
+         straggler_tail = monitor->oa_tail;
+      }
+   }
+
+   if (straggler_taken >= 0)
+      write_perf_tail(brw->perfmon.perf_oa_mmap_page, straggler_tail);
+}
+
 /**
  * Add a monitor to the global list of "unresolved monitors."
  *
@@ -568,6 +618,8 @@ add_to_unresolved_monitor_list(struct brw_context *brw,
    }
 
    brw->perfmon.unresolved[brw->perfmon.unresolved_elements++] = monitor;
+
+   update_perf_tail(brw);
 }
 
 /**
@@ -588,9 +640,11 @@ drop_from_unresolved_monitor_list(struct brw_context *brw,
          } else {
             brw->perfmon.unresolved[i] = brw->perfmon.unresolved[last_elt];
          }
-         return;
+         break;
       }
    }
+
+   update_perf_tail(brw);
 }
 
 /* XXX: For BDW+ we'll need to check fuse registers */
@@ -684,8 +738,6 @@ accumulate_oa_snapshots(struct brw_context *brw,
    uint32_t *last;
    uint32_t *end;
    uint64_t end_timestamp;
-   uint64_t straggler_tail;
-   int straggler_taken;
    uint8_t scratch[MAX_OA_PERF_SAMPLE_SIZE];
 
    assert(m->Ended);
@@ -708,9 +760,7 @@ accumulate_oa_snapshots(struct brw_context *brw,
    start_timestamp = read_report_timestamp(brw, start);
    end_timestamp = read_report_timestamp(brw, end);
 
-   head = brw->perfmon.perf_oa_mmap_page->data_head;
-   rmb();
-
+   head = read_perf_head(brw->perfmon.perf_oa_mmap_page);
    tail = monitor->oa_tail;
 
    //fprintf(stderr, "Handle event mask = 0x%" PRIx64
@@ -805,22 +855,6 @@ end:
    DBG("Marking %d resolved - results gathered\n", m->Name);
    monitor->resolved = true;
    drop_from_unresolved_monitor_list(brw, monitor);
-
-   straggler_taken = 0;
-   straggler_tail = head;
-
-   for (int i = 0; i < brw->perfmon.unresolved_elements; i++) {
-      struct brw_perf_monitor_object *monitor = brw->perfmon.unresolved[i];
-      int taken = TAKEN(head, monitor->oa_tail, size);
-
-      if (taken > straggler_taken) {
-         straggler_taken = taken;
-         straggler_tail = monitor->oa_tail;
-      }
-   }
-
-   brw->perfmon.perf_oa_mmap_page->data_tail = straggler_tail;
-   wmb();
 }
 
 /******************************************************************************/
@@ -930,8 +964,6 @@ reinitialize_perf_monitor(struct brw_context *brw,
    drop_from_unresolved_monitor_list(brw, monitor);
    monitor->resolved = false;
 
-   monitor->oa_tail = brw->perfmon.perf_oa_mmap_page->data_tail;
-
    memset(monitor->oa_accumulator, 0, sizeof(monitor->oa_accumulator));
 
    if (monitor->pipeline_stats_bo) {
@@ -1005,7 +1037,13 @@ brw_begin_perf_monitor(struct gl_context *ctx,
       emit_mi_report_perf_count(brw, monitor->oa_bo, 0,
                                 monitor->current_report_id);
 
-      /* Add the monitor to the unresolved list. */
+      /* Each unresolved monitor maintains a separate tail pointer into the
+       * circular perf sample buffer. The real tail pointer in
+       * perfmon.perf_oa_mmap_page.data_tail will correspond to the monitor
+       * tail that is furthest behind.
+       */
+      monitor->oa_tail = read_perf_head(brw->perfmon.perf_oa_mmap_page);
+
       add_to_unresolved_monitor_list(brw, monitor);
 
       ++brw->perfmon.oa_users;
