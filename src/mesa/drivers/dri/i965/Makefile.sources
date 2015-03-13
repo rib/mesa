@@ -81,6 +81,7 @@ i965_FILES = \
 	brw_nir_analyze_boolean_resolves.c \
 	brw_object_purgeable.c \
 	brw_packed_float.c \
+	brw_performance_query.c \
 	brw_primitive_restart.c \
 	brw_program.c \
 	brw_program.h \
