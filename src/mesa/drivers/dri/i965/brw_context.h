@@ -676,6 +676,21 @@ enum brw_predicate_state {
 
 struct shader_times;
 
+enum brw_query_kind {
+   PIPELINE_STATS
+};
+
+struct brw_perf_query
+{
+   enum brw_query_kind kind;
+   const char *name;
+   struct brw_perf_query_counter *counters;
+   int n_counters;
+   size_t data_size;
+};
+
+#define MAX_PERF_QUERIES 3
+
 /**
  * brw_context is derived from gl_context.
  */
@@ -1131,6 +1146,13 @@ struct brw_context
       bool supported;
    } predicate;
 
+   struct {
+      struct brw_perf_query queries[MAX_PERF_QUERIES];
+      int n_queries;
+
+      int n_active_pipeline_stats_queries;
+   } perfquery;
+
    int num_atoms[BRW_NUM_PIPELINES];
    const struct brw_tracked_state render_atoms[60];
    const struct brw_tracked_state compute_atoms[9];
@@ -1432,6 +1454,10 @@ bool brw_losslessly_compressible_format(struct brw_context *brw,
 uint32_t brw_depth_format(struct brw_context *brw, mesa_format format);
 mesa_format brw_lower_mesa_image_format(const struct brw_device_info *devinfo,
                                         mesa_format format);
+
+/* brw_performance_query.c */
+void brw_init_performance_queries(struct brw_context *brw);
+void brw_dump_perf_queries(struct brw_context *brw);
 
 /* intel_buffer_objects.c */
 int brw_bo_map(struct brw_context *brw, drm_intel_bo *bo, int write_enable,
