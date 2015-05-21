@@ -226,9 +226,7 @@ struct oa_perf_sample {
 
 /* Allow building for a more recent kernel than the system headers
  * correspond too... */
-#ifndef PERF_EVENT_IOC_FLUSH
-#include <linux/ioctl.h>
-#define PERF_EVENT_IOC_FLUSH                 _IO ('$', 9)
+#ifndef PERF_RECORD_DEVICE
 #define PERF_RECORD_DEVICE                   13
 #endif
 
@@ -675,8 +673,7 @@ accumulate_oa_snapshots(struct brw_context *brw,
 
    assert(o->Ready);
 
-   if (perf_ioctl(brw->perfquery.perf_oa_event_fd,
-                  PERF_EVENT_IOC_FLUSH, 0) < 0)
+   if (fsync(brw->perfquery.perf_oa_event_fd)  < 0)
       DBG("Failed to flush outstanding perf events: %m\n");
 
    drm_intel_bo_map(obj->oa.bo, false);
