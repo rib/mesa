@@ -26,9 +26,17 @@
  *
  * Implementation of the GL_INTEL_performance_query extension.
  *
- * Currently this driver only exposes the 64bit Pipeline Statistics Registers
- * available with Gen6 and Gen7.5, with support for Observability Counters
- * to be added later for Gen7.5+
+ * Currently there are two possible counter sources exposed here:
+ *
+ * On Gen6+ hardware we have numerous 64bit Pipeline Statistics Registers
+ * that we can snapshot at the beginning and end of a query.
+ *
+ * On Gen7.5+ we have Observability Architecture counters which are
+ * covered in separate document from the rest of the PRMs.  It is available at:
+ * https://01.org/linuxgraphics/documentation/driver-documentation-prms
+ * => 2013 Intel Core Processor Family => Observability Performance Counters
+ * (This one volume covers Sandybridge, Ivybridge, Baytrail, and Haswell,
+ * though notably we currently only support OA counters for Haswell+)
  */
 
 #include <linux/perf_event.h>
@@ -53,9 +61,12 @@
 #include "brw_context.h"
 #include "brw_defines.h"
 #include "brw_performance_query.h"
+#include "brw_oa_hsw.h"
 #include "intel_batchbuffer.h"
 
 #define FILE_DEBUG_FLAG DEBUG_PERFMON
+
+#define MAX_OA_REPORT_COUNTERS 62
 
 /**
  * i965 representation of a performance query object.
@@ -71,20 +82,84 @@ struct brw_perf_query_object
 
    const struct brw_perf_query *query;
 
-   struct {
-      /**
-       * BO containing starting and ending snapshots for the
-       * statistics counters.
-       */
-      drm_intel_bo *bo;
+   /* See query->kind to know which state below is in use... */
+   union {
+      struct {
 
-      /**
-       * Storage for final pipeline statistics counter results.
-       */
-      uint64_t *results;
+         /**
+          * BO containing OA counter snapshots at query Begin/End time.
+          */
+         drm_intel_bo *bo;
+         int current_report_id;
 
-   } pipeline_stats;
+         /**
+          * We collect periodic counter snapshots via perf so we can account
+          * for counter overflow and this is a pointer into the circular
+          * perf buffer for collecting snapshots that lie within the begin-end
+          * bounds of this query.
+          */
+         unsigned int perf_tail;
+
+         /**
+          * Storage the final accumulated OA counters.
+          */
+         uint64_t accumulator[MAX_OA_REPORT_COUNTERS];
+
+         /**
+          * false while in the unresolved_elements list, and set to true when
+          * the final, end MI_RPC snapshot has been accumulated.
+          */
+         bool results_accumulated;
+
+      } oa;
+
+      struct {
+         /**
+          * BO containing starting and ending snapshots for the
+          * statistics counters.
+          */
+         drm_intel_bo *bo;
+
+         /**
+          * Storage for final pipeline statistics counter results.
+          */
+         uint64_t *results;
+
+      } pipeline_stats;
+   };
 };
+
+/* Samples read from the perf circular buffer */
+struct oa_perf_sample {
+   struct perf_event_header header;
+   uint32_t raw_size;
+   uint8_t raw_data[];
+};
+#define MAX_OA_PERF_SAMPLE_SIZE (8 +   /* perf_event_header */       \
+                                 4 +   /* raw_size */                \
+                                 256 + /* raw OA counter snapshot */ \
+                                 4)    /* alignment padding */
+
+#define TAKEN(HEAD, TAIL, POT_SIZE)	(((HEAD) - (TAIL)) & (POT_SIZE - 1))
+
+/* Note: this will equate to 0 when the buffer is exactly full... */
+#define REMAINING(HEAD, TAIL, POT_SIZE) (POT_SIZE - TAKEN (HEAD, TAIL, POT_SIZE))
+
+#if defined(__i386__)
+#define rmb()           __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
+#define mb()            __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
+#endif
+
+#if defined(__x86_64__)
+#define rmb()           __asm__ volatile("lfence" ::: "memory")
+#define mb()            __asm__ volatile("mfence" ::: "memory")
+#endif
+
+/* Allow building for a more recent kernel than the system headers
+ * correspond too... */
+#ifndef PERF_RECORD_DEVICE
+#define PERF_RECORD_DEVICE                   13
+#endif
 
 /** Downcasting convenience macro. */
 static inline struct brw_perf_query_object *
@@ -103,10 +178,20 @@ static GLboolean brw_is_perf_query_ready(struct gl_context *,
 static void
 dump_perf_query_callback(GLuint id, void *query_void, void *brw_void)
 {
+   struct gl_context *ctx = brw_void;
    struct gl_perf_query_object *o = query_void;
    struct brw_perf_query_object *obj = query_void;
 
    switch(obj->query->kind) {
+   case OA_COUNTERS:
+      DBG("%4d: %-6s %-8s BO: %-4s OA data: %-10s %-15s\n",
+          id,
+          o->Used ? "Dirty," : "New,",
+          o->Active ? "Active," : (o->Ready ? "Ready," : "Pending,"),
+          obj->oa.bo ? "yes," : "no,",
+          brw_is_perf_query_ready(ctx, o) ? "ready," : "not ready,",
+          obj->oa.results_accumulated ? "accumulated" : "not accumulated");
+      break;
    case PIPELINE_STATS:
       DBG("%4d: %-6s %-8s BO: %-4s\n",
           id,
@@ -121,8 +206,8 @@ void
 brw_dump_perf_queries(struct brw_context *brw)
 {
    struct gl_context *ctx = &brw->ctx;
-   DBG("Queries: (Open queries = %d)\n",
-       brw->perfquery.n_active_pipeline_stats_queries);
+   DBG("Queries: (Open queries = %d, OA users = %d)\n",
+       brw->perfquery.n_active_oa_queries, brw->perfquery.n_oa_users);
    _mesa_HashWalk(ctx->PerfQuery.Objects, dump_perf_query_callback, brw);
 }
 
@@ -144,6 +229,10 @@ brw_get_perf_query_info(struct gl_context *ctx,
    *n_counters = query->n_counters;
 
    switch(query->kind) {
+   case OA_COUNTERS:
+      *n_active = brw->perfquery.n_active_oa_queries;
+      break;
+
    case PIPELINE_STATS:
       *n_active = brw->perfquery.n_active_pipeline_stats_queries;
       break;
@@ -243,6 +332,510 @@ gather_statistics_results(struct brw_context *brw,
 /******************************************************************************/
 
 /**
+ * Emit an MI_REPORT_PERF_COUNT command packet.
+ *
+ * This writes the current OA counter values to buffer.
+ */
+static void
+emit_mi_report_perf_count(struct brw_context *brw,
+                          drm_intel_bo *bo,
+                          uint32_t offset_in_bytes,
+                          uint32_t report_id)
+{
+   assert(offset_in_bytes % 64 == 0);
+
+   /* Reports apparently don't always get written unless we flush first. */
+   intel_batchbuffer_emit_mi_flush(brw);
+
+   if (brw->gen == 7) {
+      BEGIN_BATCH(3);
+      OUT_BATCH(GEN6_MI_REPORT_PERF_COUNT);
+      OUT_RELOC(bo, I915_GEM_DOMAIN_INSTRUCTION, I915_GEM_DOMAIN_INSTRUCTION,
+                offset_in_bytes);
+      OUT_BATCH(report_id);
+      ADVANCE_BATCH();
+   } else
+      unreachable("Unsupported generation for OA performance counters.");
+
+   /* Reports apparently don't always get written unless we flush after. */
+   intel_batchbuffer_emit_mi_flush(brw);
+}
+
+static unsigned int
+read_perf_head(struct perf_event_mmap_page *mmap_page)
+{
+   unsigned int head = (*(volatile uint64_t *)&mmap_page->data_head);
+   rmb();
+
+   return head;
+}
+
+static void
+write_perf_tail(struct perf_event_mmap_page *mmap_page,
+                unsigned int tail)
+{
+   /* Make sure we've finished reading all the sample data we
+    * we're consuming before updating the tail... */
+   mb();
+   mmap_page->data_tail = tail;
+}
+
+/* Update the real perf tail pointer according to the query tail that
+ * is currently furthest behind...
+ */
+static void
+update_perf_tail(struct brw_context *brw)
+{
+   unsigned int size = brw->perfquery.perf_oa_buffer_size;
+   unsigned int head = read_perf_head(brw->perfquery.perf_oa_mmap_page);
+   int straggler_taken = -1;
+   unsigned int straggler_tail;
+
+   for (int i = 0; i < brw->perfquery.unresolved_elements; i++) {
+      struct brw_perf_query_object *obj = brw->perfquery.unresolved[i];
+      int taken;
+
+      if (!obj->oa.bo)
+         continue;
+
+      taken = TAKEN(head, obj->oa.perf_tail, size);
+
+      if (taken > straggler_taken) {
+         straggler_taken = taken;
+         straggler_tail = obj->oa.perf_tail;
+      }
+   }
+
+   if (straggler_taken >= 0)
+      write_perf_tail(brw->perfquery.perf_oa_mmap_page, straggler_tail);
+}
+
+/**
+ * Add a query to the global list of "unresolved queries."
+ *
+ * Queries are "unresolved" until all the counter snapshots have been
+ * accumulated via accumulate_oa_snapshots() after the end MI_REPORT_PERF_COUNT
+ * has landed in query->oa.bo.
+ */
+static void
+add_to_unresolved_query_list(struct brw_context *brw,
+                             struct brw_perf_query_object *obj)
+{
+   if (brw->perfquery.unresolved_elements >=
+       brw->perfquery.unresolved_array_size) {
+      brw->perfquery.unresolved_array_size *= 1.5;
+      brw->perfquery.unresolved = reralloc(brw, brw->perfquery.unresolved,
+                                           struct brw_perf_query_object *,
+                                           brw->perfquery.unresolved_array_size);
+   }
+
+   brw->perfquery.unresolved[brw->perfquery.unresolved_elements++] = obj;
+
+   if (obj->oa.bo)
+      update_perf_tail(brw);
+}
+
+/**
+ * Remove a query from the global list of "unresolved queries." once
+ * the end MI_RPC OA counter snapshot has been accumulated, or when
+ * discarding unwanted query results.
+ */
+static void
+drop_from_unresolved_query_list(struct brw_context *brw,
+                                struct brw_perf_query_object *obj)
+{
+   for (int i = 0; i < brw->perfquery.unresolved_elements; i++) {
+      if (brw->perfquery.unresolved[i] == obj) {
+         int last_elt = --brw->perfquery.unresolved_elements;
+
+         if (i == last_elt)
+            brw->perfquery.unresolved[i] = NULL;
+         else
+            brw->perfquery.unresolved[i] = brw->perfquery.unresolved[last_elt];
+
+         break;
+      }
+   }
+
+   if (obj->oa.bo)
+      update_perf_tail(brw);
+}
+
+/* XXX: should we add these directly to brw_device_info maybe? */
+static void
+init_dev_info(struct brw_context *brw)
+{
+   const struct brw_device_info *info = brw->intelScreen->devinfo;
+
+   assert(info && info->is_haswell);
+
+   if (info->gt == 1) {
+      brw->perfquery.devinfo.n_eus = 10;
+      brw->perfquery.devinfo.n_eu_slices = 1;
+   } else if (info->gt == 2) {
+      brw->perfquery.devinfo.n_eus = 20;
+      brw->perfquery.devinfo.n_eu_slices = 1;
+   } else if (info->gt == 3) {
+      brw->perfquery.devinfo.n_eus = 40;
+      brw->perfquery.devinfo.n_eu_slices = 2;
+   } else
+      unreachable("Unexpected Haswell GT number");
+}
+
+static uint64_t
+read_report_timestamp(struct brw_context *brw, uint32_t *report)
+{
+   return brw->perfquery.read_oa_report_timestamp(report);
+}
+
+static void
+accumulate_uint32(uint32_t *report0,
+                  uint32_t *report1,
+                  uint64_t *accumulator)
+{
+   *accumulator += (uint32_t)(*report1 - *report0);
+}
+
+/**
+ * Given pointers to starting and ending OA snapshots, add the deltas for each
+ * counter to the results.
+ */
+static void
+add_deltas(struct brw_context *brw,
+           struct brw_perf_query_object *obj,
+           uint32_t *start, uint32_t *end)
+{
+   const struct brw_perf_query *query = obj->query;
+   int i;
+
+   assert(query->oa_format == I915_OA_FORMAT_A45_B8_C8_HSW);
+
+   accumulate_uint32(start + 1, end + 1, obj->oa.accumulator); /* timestamp */
+
+   for (i = 0; i < 61; i++)
+      accumulate_uint32(start + 3 + i, end + 3 + i, obj->oa.accumulator + 1 + i);
+}
+
+/* Handle restarting ioctl if interrupted... */
+static int
+perf_ioctl(int fd, unsigned long request, void *arg)
+{
+   int ret;
+
+   do {
+      ret = ioctl(fd, request, arg);
+   } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+   return ret;
+}
+
+static bool
+inc_n_oa_users(struct brw_context *brw)
+{
+   if (brw->perfquery.n_oa_users == 0 &&
+       perf_ioctl(brw->perfquery.perf_oa_event_fd,
+                  PERF_EVENT_IOC_ENABLE, 0) < 0)
+   {
+      return false;
+   }
+   ++brw->perfquery.n_oa_users;
+
+   return true;
+}
+
+static void
+dec_n_oa_users(struct brw_context *brw)
+{
+   /* Disabling the i915_oa event will effectively disable the OA
+    * counters.  Note it's important to be sure there are no outstanding
+    * MI_RPC commands at this point since they could stall the CS
+    * indefinitely once OACONTROL is disabled.
+    */
+   --brw->perfquery.n_oa_users;
+   if (brw->perfquery.n_oa_users == 0 &&
+       perf_ioctl(brw->perfquery.perf_oa_event_fd,
+                  PERF_EVENT_IOC_DISABLE, 0) < 0)
+   {
+      DBG("WARNING: Error disabling i915_oa perf event: %m\n");
+   }
+}
+
+/* In general if we see anything spurious while accumulating results,
+ * we don't try and continue accumulating the current query, hoping
+ * for the best, we scrap anything outstanding, and then hope for the
+ * best with new queries. */
+static void
+discard_all_queries(struct brw_context *brw)
+{
+   while (brw->perfquery.unresolved_elements) {
+      struct brw_perf_query_object *obj = brw->perfquery.unresolved[0];
+
+      obj->oa.results_accumulated = true;
+      drop_from_unresolved_query_list(brw, brw->perfquery.unresolved[0]);
+
+      dec_n_oa_users(brw);
+   }
+}
+
+/**
+ * Accumulate OA counter results from a series of snapshots.
+ *
+ * N.B. We write snapshots for the beginning and end of a query into
+ * query->oa.bo as well as collect periodic snapshots from the Linux
+ * perf interface.
+ *
+ * These periodic snapshots help to ensure we handle counter overflow
+ * correctly by being frequent enough to ensure we don't miss multiple
+ * overflows of a counter between snapshots.
+ */
+static void
+accumulate_oa_snapshots(struct brw_context *brw,
+                        struct brw_perf_query_object *obj)
+{
+   struct gl_perf_query_object *o = &obj->base;
+   uint32_t *query_buffer;
+   uint8_t *data = brw->perfquery.perf_oa_mmap_base + brw->perfquery.page_size;
+   const unsigned int size = brw->perfquery.perf_oa_buffer_size;
+   const uint64_t mask = size - 1;
+   uint64_t head;
+   uint64_t tail;
+   uint32_t *start;
+   uint64_t start_timestamp;
+   uint32_t *last;
+   uint32_t *end;
+   uint64_t end_timestamp;
+   uint8_t scratch[MAX_OA_PERF_SAMPLE_SIZE];
+
+   assert(o->Ready);
+
+   if (fsync(brw->perfquery.perf_oa_event_fd)  < 0)
+      DBG("Failed to flush outstanding perf events: %m\n");
+
+   drm_intel_bo_map(obj->oa.bo, false);
+   query_buffer = obj->oa.bo->virtual;
+
+   start = last = query_buffer;
+   end = query_buffer + (SECOND_SNAPSHOT_OFFSET_IN_BYTES / sizeof(uint32_t));
+
+   if (start[0] != obj->oa.current_report_id) {
+      DBG("Spurious start report id=%"PRIu32"\n", start[0]);
+      goto error;
+   }
+   if (end[0] != (obj->oa.current_report_id + 1)) {
+      DBG("Spurious end report id=%"PRIu32"\n", end[0]);
+      goto error;
+   }
+
+   start_timestamp = read_report_timestamp(brw, start);
+   end_timestamp = read_report_timestamp(brw, end);
+
+   head = read_perf_head(brw->perfquery.perf_oa_mmap_page);
+   tail = obj->oa.perf_tail;
+
+   while (TAKEN(head, tail, size)) {
+      const struct perf_event_header *header =
+         (const struct perf_event_header *)(data + (tail & mask));
+
+      assert(header->size != 0);
+      assert(header->size <= (head - tail));
+
+      if ((const uint8_t *)header + header->size > data + size) {
+         int before;
+
+         if (header->size > sizeof(scratch)) {
+            DBG("Spurious sample larger than expected\n");
+            goto error;
+         }
+
+         before = data + size - (const uint8_t *)header;
+
+         memcpy(scratch, header, before);
+         memcpy(scratch + before, data, header->size - before);
+
+         header = (struct perf_event_header *)scratch;
+      }
+
+      switch (header->type) {
+         case PERF_RECORD_LOST: {
+            struct {
+               struct perf_event_header header;
+               uint64_t id;
+               uint64_t n_lost;
+            } *lost = (void *)header;
+
+            DBG("i915_oa: Lost %" PRIu64 " events\n", lost->n_lost);
+            goto error;
+         }
+
+         case PERF_RECORD_THROTTLE:
+            DBG("i915_oa: Sampling has been throttled\n");
+            break;
+
+         case PERF_RECORD_UNTHROTTLE:
+            DBG("i915_oa: Sampling has been unthrottled\n");
+            break;
+
+         case PERF_RECORD_SAMPLE: {
+            struct oa_perf_sample *perf_sample = (struct oa_perf_sample *)header;
+            uint32_t *report = (uint32_t *)perf_sample->raw_data;
+            uint64_t timestamp = read_report_timestamp(brw, report);
+
+            if (timestamp >= end_timestamp)
+               goto end;
+
+            if (timestamp > start_timestamp) {
+               add_deltas(brw, obj, last, report);
+               last = report;
+            }
+
+            break;
+         }
+
+         case PERF_RECORD_DEVICE: {
+	    struct i915_oa_event {
+		struct perf_event_header header;
+		drm_i915_oa_event_header_t oa_header;
+	    } *oa_event = (void *)header;
+
+	    switch (oa_event->oa_header.type) {
+	    case I915_OA_RECORD_BUFFER_OVERFLOW:
+		DBG("i915_oa: OA buffer overflow\n");
+		break;
+	    case I915_OA_RECORD_REPORT_LOST:
+		DBG("i915_oa: OA report lost\n");
+		break;
+	    }
+
+	    break;
+         }
+
+         default:
+            DBG("i915_oa: Spurious header type = %d\n", header->type);
+      }
+
+      tail += header->size;
+   }
+
+end:
+
+   add_deltas(brw, obj, last, end);
+
+   DBG("Marking %d resolved - results gathered\n", o->Id);
+
+   drm_intel_bo_unmap(obj->oa.bo);
+   obj->oa.results_accumulated = true;
+   drop_from_unresolved_query_list(brw, obj);
+   dec_n_oa_users(brw);
+
+   return;
+
+error:
+
+   drm_intel_bo_unmap(obj->oa.bo);
+   discard_all_queries(brw);
+}
+
+/******************************************************************************/
+
+static uint64_t
+read_file_uint64 (const char *file)
+{
+   char buf[32];
+   int fd, n;
+
+   fd = open(file, 0);
+   if (fd < 0)
+      return 0;
+   n = read(fd, buf, sizeof (buf) - 1);
+   close(fd);
+   if (n < 0)
+      return 0;
+
+   buf[n] = '\0';
+   return strtoull(buf, 0, 0);
+}
+
+static uint64_t
+lookup_i915_oa_id (void)
+{
+   return read_file_uint64("/sys/bus/event_source/devices/i915_oa/type");
+}
+
+static long
+perf_event_open (struct perf_event_attr *hw_event,
+                 pid_t pid,
+                 int cpu,
+                 int group_fd,
+                 unsigned long flags)
+{
+   return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
+}
+
+static bool
+open_i915_oa_event(struct brw_context *brw,
+                   int metrics_set,
+                   int report_format,
+                   int period_exponent,
+                   int drm_fd,
+                   uint32_t ctx_id)
+{
+   struct perf_event_attr attr;
+   drm_i915_oa_attr_t oa_attr;
+   int event_fd;
+   void *mmap_base;
+
+   memset(&attr, 0, sizeof(attr));
+   attr.size = sizeof(attr);
+   attr.type = lookup_i915_oa_id();
+
+   attr.sample_type = PERF_SAMPLE_RAW;
+   attr.disabled = 1;
+   attr.sample_period = 1;
+
+   memset(&oa_attr, 0, sizeof(oa_attr));
+   oa_attr.size = sizeof(oa_attr);
+
+   oa_attr.format = report_format;
+   oa_attr.metrics_set = metrics_set;
+   oa_attr.timer_exponent = period_exponent;
+
+   oa_attr.single_context = true;
+   oa_attr.ctx_id = ctx_id;
+   oa_attr.drm_fd = drm_fd;
+
+   attr.config = (uint64_t)&oa_attr;
+
+   event_fd = perf_event_open(&attr,
+                              -1, /* pid */
+                              0, /* cpu */
+                              -1, /* group fd */
+                              PERF_FLAG_FD_CLOEXEC); /* flags */
+   if (event_fd == -1) {
+      DBG("Error opening i915_oa perf event: %m\n");
+      return false;
+   }
+
+   /* NB: A read-write mapping ensures the kernel will stop writing data when
+    * the buffer is full, and will report samples as lost. */
+   mmap_base = mmap(NULL,
+                    brw->perfquery.perf_oa_buffer_size + brw->perfquery.page_size,
+                    PROT_READ | PROT_WRITE, MAP_SHARED, event_fd, 0);
+   if (mmap_base == MAP_FAILED) {
+      DBG("Error mapping circular buffer, %m\n");
+      close (event_fd);
+      return false;
+   }
+
+   brw->perfquery.perf_oa_event_fd = event_fd;
+   brw->perfquery.perf_oa_mmap_base = mmap_base;
+   brw->perfquery.perf_oa_mmap_page = mmap_base;
+
+   brw->perfquery.perf_oa_metrics_set = metrics_set;
+   brw->perfquery.perf_oa_format = report_format;
+
+   return true;
+}
+
+/**
  * Driver hook for glBeginPerfQueryINTEL().
  */
 static GLboolean
@@ -251,6 +844,7 @@ brw_begin_perf_query(struct gl_context *ctx,
 {
    struct brw_context *brw = brw_context(ctx);
    struct brw_perf_query_object *obj = brw_perf_query(o);
+   const struct brw_perf_query *query = obj->query;
 
    assert(!o->Active);
    assert(!o->Used || o->Ready); /* no in-flight query to worry about */
@@ -258,6 +852,89 @@ brw_begin_perf_query(struct gl_context *ctx,
    DBG("Begin(%d)\n", o->Id);
 
    switch(obj->query->kind) {
+   case OA_COUNTERS:
+      /* If the OA counters aren't already on, enable them. */
+      if (brw->perfquery.perf_oa_event_fd == -1) {
+         __DRIscreen *screen = brw->intelScreen->driScrnPriv;
+         uint32_t ctx_id = drm_intel_gem_context_get_context_id(brw->hw_ctx);
+         int period_exponent;
+
+         /* The timestamp for HSW+ increments every 80ns
+          *
+          * The period_exponent gives a sampling period as follows:
+          *   sample_period = 80ns * 2^(period_exponent + 1)
+          *
+          * The overflow period for Haswell can be calculated as:
+          *
+          * 2^32 / (n_eus * max_gen_freq * 2)
+          * (E.g. 40 EUs @ 1GHz = ~53ms)
+          *
+          * We currently sample every 42 milliseconds...
+          */
+         period_exponent = 18;
+
+         if (!open_i915_oa_event(brw,
+                                 query->oa_metrics_set,
+                                 query->oa_format,
+                                 period_exponent,
+                                 screen->fd, /* drm fd */
+                                 ctx_id))
+            return false;
+      } else {
+         /* Opening an i915_oa event fd implies exclusive access to
+          * the OA unit which will generate counter reports for a
+          * specific counter set with a specific layout/format so we
+          * can't begin any OA based queries that require a different
+          * counter set or format unless we get an opportunity to
+          * close the event fd and open a new one...
+          */
+         if (brw->perfquery.perf_oa_metrics_set != query->oa_metrics_set ||
+             brw->perfquery.perf_oa_format != query->oa_format)
+         {
+            return false;
+         }
+      }
+
+      if (!inc_n_oa_users(brw)) {
+         DBG("WARNING: Error enabling i915_oa perf event: %m\n");
+         return false;
+      }
+
+      if (obj->oa.bo) {
+         drm_intel_bo_unreference(obj->oa.bo);
+         obj->oa.bo = NULL;
+      }
+
+      obj->oa.bo =
+         drm_intel_bo_alloc(brw->bufmgr, "perf. query OA bo", 4096, 64);
+#ifdef DEBUG
+      /* Pre-filling the BO helps debug whether writes landed. */
+      drm_intel_bo_map(obj->oa.bo, true);
+      memset((char *) obj->oa.bo->virtual, 0x80, 4096);
+      drm_intel_bo_unmap(obj->oa.bo);
+#endif
+
+      obj->oa.current_report_id = brw->perfquery.next_query_start_report_id;
+      brw->perfquery.next_query_start_report_id += 2;
+
+      /* Take a starting OA counter snapshot. */
+      emit_mi_report_perf_count(brw, obj->oa.bo, 0,
+                                obj->oa.current_report_id);
+      ++brw->perfquery.n_active_oa_queries;
+
+      /* Each unresolved query maintains a separate tail pointer into the
+       * circular perf sample buffer. The real tail pointer in
+       * perfquery.perf_oa_mmap_page.data_tail will correspond to the query
+       * tail that is furthest behind.
+       */
+      obj->oa.perf_tail = read_perf_head(brw->perfquery.perf_oa_mmap_page);
+
+      memset(obj->oa.accumulator, 0, sizeof(obj->oa.accumulator));
+      obj->oa.results_accumulated = false;
+
+      add_to_unresolved_query_list(brw, obj);
+      break;
+
    case PIPELINE_STATS:
       if (obj->pipeline_stats.bo) {
          drm_intel_bo_unreference(obj->pipeline_stats.bo);
@@ -277,6 +954,9 @@ brw_begin_perf_query(struct gl_context *ctx,
       break;
    }
 
+   if (INTEL_DEBUG & DEBUG_PERFMON)
+      brw_dump_perf_queries(brw);
+
    return true;
 }
 
@@ -293,6 +973,27 @@ brw_end_perf_query(struct gl_context *ctx,
    DBG("End(%d)\n", o->Id);
 
    switch(obj->query->kind) {
+   case OA_COUNTERS:
+
+      /* NB: It's possible that the query will have already been marked
+       * as 'accumulated' if an error was seen while reading samples
+       * from perf. In this case we mustn't try and emit a closing
+       * MI_RPC command in case the OA unit has already been disabled
+       */
+      if (!obj->oa.results_accumulated) {
+         /* Take an ending OA counter snapshot. */
+         emit_mi_report_perf_count(brw, obj->oa.bo,
+                                   SECOND_SNAPSHOT_OFFSET_IN_BYTES,
+                                   obj->oa.current_report_id + 1);
+      }
+
+      --brw->perfquery.n_active_oa_queries;
+
+      /* NB: even though the query has now ended, it can't be resolved
+       * until the end MI_REPORT_PERF_COUNT snapshot has been written
+       * to query->oa.bo */
+      break;
+
    case PIPELINE_STATS:
       /* Take ending snapshots. */
       snapshot_statistics_registers(brw, obj,
@@ -312,6 +1013,10 @@ brw_wait_perf_query(struct gl_context *ctx, struct gl_perf_query_object *o)
    assert(!o->Ready);
 
    switch(obj->query->kind) {
+   case OA_COUNTERS:
+      bo = obj->oa.bo;
+      break;
+
    case PIPELINE_STATS:
       bo = obj->pipeline_stats.bo;
       break;
@@ -347,6 +1052,12 @@ brw_is_perf_query_ready(struct gl_context *ctx,
       return true;
 
    switch(obj->query->kind) {
+   case OA_COUNTERS:
+      return (obj->oa.results_accumulated ||
+              (obj->oa.bo &&
+               !drm_intel_bo_references(brw->batch.bo, obj->oa.bo) &&
+               !drm_intel_bo_busy(obj->oa.bo)));
+
    case PIPELINE_STATS:
       return (obj->pipeline_stats.bo &&
               !drm_intel_bo_references(brw->batch.bo, obj->pipeline_stats.bo) &&
@@ -355,6 +1066,49 @@ brw_is_perf_query_ready(struct gl_context *ctx,
 
    unreachable("missing ready check for unknown query kind");
    return false;
+}
+
+static int
+get_oa_counter_data(struct brw_context *brw,
+                    struct brw_perf_query_object *obj,
+                    size_t data_size,
+                    uint8_t *data)
+{
+   const struct brw_perf_query *query = obj->query;
+   int n_counters = query->n_counters;
+   int written = 0;
+
+   if (!obj->oa.results_accumulated) {
+      accumulate_oa_snapshots(brw, obj);
+      assert(obj->oa.results_accumulated);
+   }
+
+   for (int i = 0; i < n_counters; i++) {
+      const struct brw_perf_query_counter *counter = &query->counters[i];
+      uint64_t *out_uint64;
+      float *out_float;
+
+      if (counter->size) {
+         switch (counter->data_type) {
+         case GL_PERFQUERY_COUNTER_DATA_UINT64_INTEL:
+            out_uint64 = (uint64_t *)(data + counter->offset);
+            *out_uint64 = counter->oa_counter_read_uint64(brw, query,
+                                                          obj->oa.accumulator);
+            break;
+         case GL_PERFQUERY_COUNTER_DATA_FLOAT_INTEL:
+            out_float = (float *)(data + counter->offset);
+            *out_float = counter->oa_counter_read_float(brw, query,
+                                                        obj->oa.accumulator);
+            break;
+         default:
+            /* So far we aren't using uint32, double or bool32... */
+            unreachable("unexpected counter data type");
+         }
+         written = counter->offset + counter->size;
+      }
+   }
+
+   return written;
 }
 
 static int
@@ -400,12 +1154,18 @@ brw_get_perf_query_data(struct gl_context *ctx,
    assert(brw_is_perf_query_ready(ctx, o));
 
    DBG("GetData(%d)\n", o->Id);
-   brw_dump_perf_queries(brw);
+
+   if (INTEL_DEBUG & DEBUG_PERFMON)
+      brw_dump_perf_queries(brw);
 
    /* This hook should only be called when results are available. */
    assert(o->Ready);
 
    switch(obj->query->kind) {
+   case OA_COUNTERS:
+      written = get_oa_counter_data(brw, obj, data_size, (uint8_t *)data);
+      break;
+
    case PIPELINE_STATS:
       written = get_pipeline_stats_data(brw, obj, data_size, (uint8_t *)data);
       break;
@@ -428,7 +1188,26 @@ brw_new_perf_query_object(struct gl_context *ctx, int query_index)
 
    obj->query = query;
 
+   brw->perfquery.n_query_instances++;
+
    return &obj->base;
+}
+
+static void
+close_perf(struct brw_context *brw)
+{
+   if (brw->perfquery.perf_oa_event_fd != -1) {
+      if (brw->perfquery.perf_oa_mmap_base) {
+         size_t mapping_len =
+            brw->perfquery.perf_oa_buffer_size + brw->perfquery.page_size;
+
+         munmap(brw->perfquery.perf_oa_mmap_base, mapping_len);
+         brw->perfquery.perf_oa_mmap_base = NULL;
+      }
+
+      close(brw->perfquery.perf_oa_event_fd);
+      brw->perfquery.perf_oa_event_fd = -1;
+   }
 }
 
 /**
@@ -438,6 +1217,7 @@ static void
 brw_delete_perf_query(struct gl_context *ctx,
                       struct gl_perf_query_object *o)
 {
+   struct brw_context *brw = brw_context(ctx);
    struct brw_perf_query_object *obj = brw_perf_query(o);
 
    assert(!o->Active);
@@ -446,6 +1226,20 @@ brw_delete_perf_query(struct gl_context *ctx,
    DBG("Delete(%d)\n", o->Id);
 
    switch(obj->query->kind) {
+   case OA_COUNTERS:
+      if (obj->oa.bo) {
+         if (!obj->oa.results_accumulated) {
+            drop_from_unresolved_query_list(brw, obj);
+            dec_n_oa_users(brw);
+         }
+
+         drm_intel_bo_unreference(obj->oa.bo);
+         obj->oa.bo = NULL;
+      }
+
+      obj->oa.results_accumulated = false;
+      break;
+
    case PIPELINE_STATS:
       if (obj->pipeline_stats.bo) {
          drm_intel_bo_unreference(obj->pipeline_stats.bo);
@@ -458,6 +1252,18 @@ brw_delete_perf_query(struct gl_context *ctx,
    }
 
    free(obj);
+
+   if (--brw->perfquery.n_query_instances == 0)
+      close_perf(brw);
+}
+
+/******************************************************************************/
+
+static uint64_t
+hsw_read_report_timestamp(uint32_t *report)
+{
+   /* The least significant timestamp bit represents 80ns on Haswell */
+   return ((uint64_t)report[1]) * 80;
 }
 
 #define SCALED_NAMED_STAT(REG, NUM, DEN, NAME, DESC)        \
@@ -575,6 +1381,8 @@ brw_init_performance_queries(struct brw_context *brw)
    ctx->Driver.IsPerfQueryReady = brw_is_perf_query_ready;
    ctx->Driver.GetPerfQueryData = brw_get_perf_query_data;
 
+   init_dev_info(brw);
+
    if (brw->gen == 6) {
       add_pipeline_statistics_query(brw, "Gen6 Pipeline Statistics Registers",
                                     gen6_pipeline_statistics,
@@ -585,7 +1393,24 @@ brw_init_performance_queries(struct brw_context *brw)
                                     gen7_pipeline_statistics,
                                     (sizeof(gen7_pipeline_statistics)/
                                      sizeof(gen7_pipeline_statistics[0])));
+
+      if (brw->is_haswell) {
+         brw->perfquery.read_oa_report_timestamp = hsw_read_report_timestamp;
+         brw_oa_add_render_basic_counter_query_hsw(brw);
+      }
    }
 
    ctx->PerfQuery.NumQueries = brw->perfquery.n_queries;
+
+   brw->perfquery.unresolved =
+      ralloc_array(brw, struct brw_perf_query_object *, 2);
+   brw->perfquery.unresolved_elements = 0;
+   brw->perfquery.unresolved_array_size = 2;
+
+   brw->perfquery.page_size = sysconf(_SC_PAGE_SIZE);
+
+   brw->perfquery.perf_oa_event_fd = -1;
+   brw->perfquery.perf_oa_buffer_size = 1024 * 1024; /* NB: must be power of two */
+
+   brw->perfquery.next_query_start_report_id = 1000;
 }
