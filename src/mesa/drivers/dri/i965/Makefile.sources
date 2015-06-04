@@ -88,6 +88,8 @@ i965_FILES = \
 	brw_object_purgeable.c \
 	brw_packed_float.c \
 	brw_pipe_control.c \
+	brw_oa_hsw.h \
+	brw_oa_hsw.c \
 	brw_performance_query.h \
 	brw_performance_query.c \
 	brw_primitive_restart.c \
