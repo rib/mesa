@@ -1395,6 +1395,13 @@ struct brw_context
    } query;
 
    struct {
+      /* Extended devinfo, needed to normalize counters aggregated across all
+       * EUs/slices/samplers */
+      struct {
+         int n_eus;
+         int n_eu_slices;
+      } devinfo;
+
       struct brw_perf_query queries[MAX_PERF_QUERIES];
       int n_queries;
 
