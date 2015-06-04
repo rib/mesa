@@ -954,6 +954,7 @@ struct brw_stage_state
 };
 
 enum brw_query_kind {
+   OA_COUNTERS,
    PIPELINE_STATS
 };
 
@@ -1406,16 +1407,67 @@ struct brw_context
 
    struct {
       /* Extended devinfo, needed to normalize counters aggregated across all
-       * EUs/slices/samplers */
+       * EUs/slices */
       struct {
          int n_eus;
          int n_eu_slices;
       } devinfo;
 
+      /* The system's page size */
+      unsigned int page_size;
+
       struct brw_perf_query queries[MAX_PERF_QUERIES];
       int n_queries;
 
+      /* The i915_oa perf event we open to setup + enable the OA counters */
+      int perf_oa_event_fd;
+
+      /* An i915_oa perf event fd gives exclusive access to the OA unit that
+       * will report counter snapshots for a specific counter set/profile in a
+       * specific layout/format so we can only start OA queries that are
+       * compatible with the currently open fd... */
+      int perf_oa_metrics_set;
+      int perf_oa_format;
+
+      /* The mmaped circular buffer for collecting samples from perf */
+      uint8_t *perf_oa_mmap_base;
+      size_t perf_oa_buffer_size;
+      struct perf_event_mmap_page *perf_oa_mmap_page;
+
+      int n_active_oa_queries;
       int n_active_pipeline_stats_queries;
+
+      /* The number of queries depending on running OA counters which
+       * extends beyond brw_end_perf_query() since we need to wait until
+       * the last MI_RPC command has been written.
+       *
+       * Accurate accounting is important here as emitting an
+       * MI_REPORT_PERF_COUNT command while the OA unit is disabled will
+       * effectively hang the gpu.
+       */
+      int n_oa_users;
+
+      /* To help catch an spurious problem with the hardware or perf
+       * forwarding samples, we emit each MI_REPORT_PERF_COUNT command
+       * with a unique ID that we can explicitly check for... */
+      int next_query_start_report_id;
+
+      /**
+       * An array of queries whose results haven't yet been assembled based on
+       * the data in buffer objects.
+       *
+       * These may be active, or have already ended.  However, the results
+       * have not been requested.
+       */
+      struct brw_perf_query_object **unresolved;
+      int unresolved_elements;
+      int unresolved_array_size;
+
+      /* The total number of query objects so we can relinquish
+       * our exclusive access to perf if the application deletes
+       * all of its objects. (NB: We only disable perf while
+       * there are no active queries) */
+      int n_query_instances;
    } perfquery;
 
    int num_atoms[BRW_NUM_PIPELINES];
