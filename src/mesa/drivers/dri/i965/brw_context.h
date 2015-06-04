@@ -964,6 +964,16 @@ struct brw_perf_query
    struct brw_perf_query_counter *counters;
    int n_counters;
    size_t data_size;
+
+   /* OA specific */
+   int oa_metrics_set;
+   int oa_format;
+
+   /* For indexing into the accumulator[] ... */
+   int gpu_time_offset;
+   int a_offset;
+   int b_offset;
+   int c_offset;
 };
 
 #define MAX_PERF_QUERIES 3
