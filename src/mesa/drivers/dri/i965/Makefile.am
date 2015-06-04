@@ -93,7 +93,9 @@ BUILT_SOURCES = $(i965_compiler_GENERATED_FILES)
 CLEANFILES = $(BUILT_SOURCES)
 
 EXTRA_DIST = \
-	brw_nir_trig_workarounds.py
+	brw_nir_trig_workarounds.py \
+	brw_oa_hsw.xml \
+	brw_oa.py
 
 TEST_LIBS = \
 	libi965_compiler.la \
@@ -169,3 +171,14 @@ test_eu_validate_SOURCES = \
 test_eu_validate_LDADD = \
 	$(top_builddir)/src/gtest/libgtest.la \
 	$(TEST_LIBS)
+
+BUILT_SOURCES = \
+	brw_oa_hsw.h \
+	brw_oa_hsw.c
+
+brw_oa_hsw.h brw_oa_hsw.c: brw_oa_hsw.xml brw_oa.py Makefile
+       $(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py \
+          --header=$(builddir)/brw_oa_hsw.h \
+          --code=$(builddir)/brw_oa_hsw.c \
+          --chipset="hsw" \
+          $(srcdir)/brw_oa_hsw.xml
