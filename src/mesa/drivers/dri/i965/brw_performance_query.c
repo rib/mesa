@@ -1397,6 +1397,11 @@ brw_init_performance_queries(struct brw_context *brw)
       if (brw->is_haswell) {
          brw->perfquery.read_oa_report_timestamp = hsw_read_report_timestamp;
          brw_oa_add_render_basic_counter_query_hsw(brw);
+         brw_oa_add_compute_basic_counter_query_hsw(brw);
+         brw_oa_add_compute_extended_counter_query_hsw(brw);
+         brw_oa_add_memory_reads_counter_query_hsw(brw);
+         brw_oa_add_memory_writes_counter_query_hsw(brw);
+         brw_oa_add_sampler_balance_counter_query_hsw(brw);
       }
    }
 

@@ -977,7 +977,7 @@ struct brw_perf_query
    int c_offset;
 };
 
-#define MAX_PERF_QUERIES 3
+#define MAX_PERF_QUERIES 7
 
 /**
  * brw_context is derived from gl_context.
