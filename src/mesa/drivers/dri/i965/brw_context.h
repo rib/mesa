@@ -972,6 +972,7 @@ struct brw_perf_query
 
    /* For indexing into the accumulator[] ... */
    int gpu_time_offset;
+   int gpu_clock_offset;
    int a_offset;
    int b_offset;
    int c_offset;
@@ -1409,8 +1410,10 @@ struct brw_context
       /* Extended devinfo, needed to normalize counters aggregated across all
        * EUs/slices/samplers */
       struct {
-         int n_eus;
-         int n_eu_slices;
+         uint64_t n_eus;
+         uint64_t n_eu_slices;
+         uint64_t n_eu_sub_slices;
+         uint64_t n_samplers;
       } devinfo;
 
       /* The system's page size */
@@ -1433,9 +1436,6 @@ struct brw_context
       uint8_t *perf_oa_mmap_base;
       size_t perf_oa_buffer_size;
       struct perf_event_mmap_page *perf_oa_mmap_page;
-
-      /* A common OA counter that we want to read directly in several places */
-      uint64_t (*read_oa_report_timestamp)(uint32_t *report);
 
       int n_active_oa_queries;
       int n_active_pipeline_stats_queries;

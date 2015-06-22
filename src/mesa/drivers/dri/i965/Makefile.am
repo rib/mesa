@@ -43,6 +43,7 @@ AM_CXXFLAGS = $(AM_CFLAGS)
 
 EXTRA_DIST = \
 	brw_oa_hsw.xml \
+	brw_oa_bdw.xml \
 	brw_oa.py
 
 noinst_LTLIBRARIES = libi965_dri.la
@@ -106,10 +107,18 @@ test_eu_compact_LDADD = $(TEST_LIBS)
 
 BUILT_SOURCES = \
 	brw_oa_hsw.h \
-	brw_oa_hsw.c
+	brw_oa_hsw.c \
+	brw_oa_bdw.h \
+	brw_oa_bdw.c
 
 brw_oa_hsw.c: brw_oa_hsw.xml brw_oa.py
 	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --code=$(builddir)/brw_oa_hsw.c --include="brw_oa_hsw.h" $(srcdir)/brw_oa_hsw.xml
 
 brw_oa_hsw.h: brw_oa_hsw.xml brw_oa.py
 	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --header=$(builddir)/brw_oa_hsw.h $(srcdir)/brw_oa_hsw.xml
+
+brw_oa_bdw.c: brw_oa_bdw.xml brw_oa.py
+	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --code=$(builddir)/brw_oa_bdw.c --include="brw_oa_bdw.h" $(srcdir)/brw_oa_bdw.xml
+
+brw_oa_bdw.h: brw_oa_bdw.xml brw_oa.py
+	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --header=$(builddir)/brw_oa_bdw.h $(srcdir)/brw_oa_bdw.xml

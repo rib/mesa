@@ -349,16 +349,18 @@ for set in tree.findall(".//set"):
     read_funcs = {}
     counter_vars = {}
     counters = set.findall("counter")
+    chipset = set.get('chipset').lower()
+
     for counter in counters:
         empty_vars = {}
         read_funcs[counter.get('symbol_name')] = output_counter_read(set, counter, counter_vars)
         max_values[counter.get('symbol_name')] = output_counter_max(set, counter, empty_vars)
         counter_vars["$" + counter.get('symbol_name')] = counter
 
-    h("void brw_oa_add_" + set.get('underscore_name') + "_counter_query_" + set.get('chipset').lower() + "(struct brw_context *brw);\n")
+    h("void brw_oa_add_" + set.get('underscore_name') + "_counter_query_" + chipset + "(struct brw_context *brw);\n")
 
     c("\nvoid\n")
-    c("brw_oa_add_" + set.get('underscore_name') + "_counter_query_" + set.get('chipset').lower() + "(struct brw_context *brw)\n")
+    c("brw_oa_add_" + set.get('underscore_name') + "_counter_query_" + chipset + "(struct brw_context *brw)\n")
     c("{\n")
     c_indent(3)
 
@@ -373,9 +375,21 @@ for set in tree.findall(".//set"):
     c("query->name = \"" + set.get('name') + "\";\n")
 
     c("query->counters = rzalloc_array(brw, struct brw_perf_query_counter, " + str(len(counters)) + ");\n")
-    c("""query->n_counters = 0;
-query->oa_metrics_set = I915_OA_METRICS_SET_3D;
-query->oa_format = I915_OA_FORMAT_A45_B8_C8_HSW;
+    c("query->n_counters = 0;\n")
+    c("query->oa_metrics_set = I915_OA_METRICS_SET_3D;\n")
+    if chipset == "bdw":
+        c("""query->oa_format = I915_OA_FORMAT_A36_B8_C8_BDW;
+
+/* Accumulation buffer offsets... */
+query->gpu_time_offset = 0;
+query->gpu_clock_offset = 1;
+query->a_offset = 2;
+query->b_offset = query->a_offset + 36;
+query->c_offset = query->b_offset + 8;
+
+""")
+    elif chipset == "hsw":
+        c("""query->oa_format = I915_OA_FORMAT_A45_B8_C8_HSW;
 
 /* Accumulation buffer offsets... */
 query->gpu_time_offset = 0;
@@ -384,6 +398,8 @@ query->b_offset = query->a_offset + 45;
 query->c_offset = query->b_offset + 8;
 
 """)
+    else:
+        assert 0
 
     offset = 0
     for counter in counters:

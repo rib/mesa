@@ -83,6 +83,8 @@ i965_FILES = \
 	brw_packed_float.c \
 	brw_oa_hsw.h \
 	brw_oa_hsw.c \
+	brw_oa_bdw.h \
+	brw_oa_bdw.c \
 	brw_performance_query.h \
 	brw_performance_query.c \
 	brw_primitive_restart.c \
