@@ -375,9 +375,11 @@ for set in tree.findall(".//set"):
     c("query->name = \"" + set.get('name') + "\";\n")
 
     c("query->counters = rzalloc_array(brw, struct brw_perf_query_counter, " + str(len(counters)) + ");\n")
-    c("""query->n_counters = 0;
-query->oa_metrics_set = I915_OA_METRICS_SET_3D;
-query->oa_format = I915_OA_FORMAT_A45_B8_C8;
+    c("query->n_counters = 0;\n")
+    c("query->oa_metrics_set = I915_OA_METRICS_SET_3D;\n")
+
+    if chipset == "hsw":
+        c("""query->oa_format = I915_OA_FORMAT_A45_B8_C8;
 
 /* Accumulation buffer offsets... */
 query->gpu_time_offset = 0;
@@ -386,6 +388,18 @@ query->b_offset = query->a_offset + 45;
 query->c_offset = query->b_offset + 8;
 
 """)
+    else:
+        c("""query->oa_format = I915_OA_FORMAT_A32u40_A4u32_B8_C8;
+
+/* Accumulation buffer offsets... */
+query->gpu_time_offset = 0;
+query->gpu_clock_offset = 1;
+query->a_offset = 2;
+query->b_offset = query->a_offset + 36;
+query->c_offset = query->b_offset + 8;
+
+""")
+
 
     offset = 0
     for counter in counters:
