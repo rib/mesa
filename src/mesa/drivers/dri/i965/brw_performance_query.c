@@ -50,6 +50,8 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 
+#include <xf86drm.h>
+
 #include "main/hash.h"
 #include "main/macros.h"
 #include "main/mtypes.h"
@@ -62,11 +64,21 @@
 #include "brw_defines.h"
 #include "brw_performance_query.h"
 #include "brw_oa_hsw.h"
+#include "brw_oa_bdw.h"
 #include "intel_batchbuffer.h"
 
 #define FILE_DEBUG_FLAG DEBUG_PERFMON
 
 #define MAX_OA_REPORT_COUNTERS 62
+
+#define OAREPORT_REASON_MASK           0x3f
+#define OAREPORT_REASON_SHIFT          19
+#define OAREPORT_REASON_TIMER          (1<<0)
+#define OAREPORT_REASON_TRIGGER1       (1<<1)
+#define OAREPORT_REASON_TRIGGER2       (1<<2)
+#define OAREPORT_REASON_CTX_SWITCH     (1<<3)
+#define OAREPORT_REASON_GO_TRANSITION  (1<<4)
+
 
 /**
  * i965 representation of a performance query object.
@@ -347,15 +359,21 @@ emit_mi_report_perf_count(struct brw_context *brw,
    /* Reports apparently don't always get written unless we flush first. */
    intel_batchbuffer_emit_mi_flush(brw);
 
-   if (brw->gen == 7) {
+   if (brw->gen < 8) {
       BEGIN_BATCH(3);
       OUT_BATCH(GEN6_MI_REPORT_PERF_COUNT);
       OUT_RELOC(bo, I915_GEM_DOMAIN_INSTRUCTION, I915_GEM_DOMAIN_INSTRUCTION,
                 offset_in_bytes);
       OUT_BATCH(report_id);
       ADVANCE_BATCH();
-   } else
-      unreachable("Unsupported generation for OA performance counters.");
+   } else {
+      BEGIN_BATCH(4);
+      OUT_BATCH(GEN8_MI_REPORT_PERF_COUNT);
+      OUT_RELOC64(bo, I915_GEM_DOMAIN_INSTRUCTION, I915_GEM_DOMAIN_INSTRUCTION,
+                  offset_in_bytes);
+      OUT_BATCH(report_id);
+      ADVANCE_BATCH();
+   }
 
    /* Reports apparently don't always get written unless we flush after. */
    intel_batchbuffer_emit_mi_flush(brw);
@@ -466,20 +484,42 @@ static void
 init_dev_info(struct brw_context *brw)
 {
    const struct brw_device_info *info = brw->intelScreen->devinfo;
+   __DRIscreen *screen = brw->intelScreen->driScrnPriv;
 
-   assert(info && info->is_haswell);
+   if (brw->is_haswell) {
+      if (info->gt == 1) {
+         brw->perfquery.devinfo.n_eus = 10;
+         brw->perfquery.devinfo.n_eu_slices = 1;
+      } else if (info->gt == 2) {
+         brw->perfquery.devinfo.n_eus = 20;
+         brw->perfquery.devinfo.n_eu_slices = 1;
+      } else if (info->gt == 3) {
+         brw->perfquery.devinfo.n_eus = 40;
+         brw->perfquery.devinfo.n_eu_slices = 2;
+      }
+   } else {
+#ifdef I915_PARAM_EU_TOTAL
+      drm_i915_getparam_t gp;
+      int ret;
+      int n_eus;
+      int slice_mask;
 
-   if (info->gt == 1) {
-      brw->perfquery.devinfo.n_eus = 10;
-      brw->perfquery.devinfo.n_eu_slices = 1;
-   } else if (info->gt == 2) {
-      brw->perfquery.devinfo.n_eus = 20;
-      brw->perfquery.devinfo.n_eu_slices = 1;
-   } else if (info->gt == 3) {
-      brw->perfquery.devinfo.n_eus = 40;
-      brw->perfquery.devinfo.n_eu_slices = 2;
-   } else
-      unreachable("Unexpected Haswell GT number");
+      gp.param = I915_PARAM_EU_TOTAL;
+      gp.value = &n_eus;
+      ret = drmIoctl(screen->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+      assert(ret == 0 && n_eus > 0);
+
+      gp.param = I915_PARAM_SLICE_MASK;
+      gp.value = &slice_mask;
+      ret = drmIoctl(screen->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+      assert(ret == 0 && slice_mask);
+
+      brw->perfquery.devinfo.n_eus = n_eus;
+      brw->perfquery.devinfo.n_eu_slices = _mesa_bitcount(slice_mask);
+#else
+      assert(0);
+#endif
+   }
 }
 
 static uint64_t
@@ -497,6 +537,28 @@ accumulate_uint32(const uint32_t *report0,
    *accumulator += (uint32_t)(*report1 - *report0);
 }
 
+static void
+accumulate_uint40(int a_index,
+                  const uint32_t *report0,
+                  const uint32_t *report1,
+                  uint64_t *accumulator)
+{
+   const uint8_t *high_bytes0 = (uint8_t *)(report0 + 40);
+   const uint8_t *high_bytes1 = (uint8_t *)(report1 + 40);
+   uint64_t high0 = (uint64_t)(high_bytes0[a_index]) << 32;
+   uint64_t high1 = (uint64_t)(high_bytes1[a_index]) << 32;
+   uint64_t value0 = report0[a_index + 4] | high0;
+   uint64_t value1 = report1[a_index + 4] | high1;
+   uint64_t delta;
+
+   if (value0 > value1)
+      delta = (1ULL << 40) + value1 - value0;
+   else
+      delta = value1 - value0;
+
+   *accumulator += delta;
+}
+
 /**
  * Given pointers to starting and ending OA snapshots, add the deltas for each
  * counter to the results.
@@ -508,14 +570,38 @@ add_deltas(struct brw_context *brw,
            const uint32_t *end)
 {
    const struct brw_perf_query *query = obj->query;
+   uint64_t *accumulator = obj->oa.accumulator;
+   int idx = 0;
    int i;
 
-   assert(query->oa_format == I915_OA_FORMAT_A45_B8_C8);
+   switch (query->oa_format) {
+   case I915_OA_FORMAT_A32u40_A4u32_B8_C8:
+      accumulate_uint32(start + 1, end + 1, accumulator + idx++); /* timestamp */
+      accumulate_uint32(start + 3, end + 3, accumulator + idx++); /* clock */
 
-   accumulate_uint32(start + 1, end + 1, obj->oa.accumulator); /* timestamp */
+      /* 32x 40bit A counters... */
+      for (i = 0; i < 32; i++)
+         accumulate_uint40(i, start, end, accumulator + idx++);
 
-   for (i = 0; i < 61; i++)
-      accumulate_uint32(start + 3 + i, end + 3 + i, obj->oa.accumulator + 1 + i);
+      /* 4x 32bit A counters... */
+      for (i = 0; i < 4; i++)
+         accumulate_uint32(start + 36 + i, end + 36 + i, accumulator + idx++);
+
+      /* 8x 32bit B counters + 8x 32bit C counters... */
+      for (i = 0; i < 16; i++)
+         accumulate_uint32(start + 48 + i, end + 48 + i, accumulator + idx++);
+
+      break;
+   case I915_OA_FORMAT_A45_B8_C8:
+      accumulate_uint32(start + 1, end + 1, accumulator); /* timestamp */
+
+      for (i = 0; i < 61; i++)
+         accumulate_uint32(start + 3 + i, end + 3 + i, accumulator + 1 + i);
+
+      break;
+   default:
+      unreachable("Can't accumulate OA counters in unknown format");
+   }
 }
 
 /* Handle restarting ioctl if interrupted... */
@@ -685,7 +771,29 @@ accumulate_oa_snapshots(struct brw_context *brw,
                goto end;
 
             if (timestamp > start_timestamp) {
-               add_deltas(brw, obj, last, report);
+
+               /* Since the counters continue while other contexts are
+                * running we need to discount any unrelated delta. The
+                * hardware automatically generates a report on context
+                * switch which gives us a new reference point to
+                * continuing adding deltas from.
+                *
+                * Note: Haswell doesn't report a reason within the
+                * RPT_ID field but on haswell we're relying on the
+                * hardware to filter per-context metrics for us
+                * instead.
+                */
+
+               if (brw->gen >= 8) {
+                  uint32_t reason = (report[0] >> OAREPORT_REASON_SHIFT) &
+                     OAREPORT_REASON_MASK;
+
+                  if (!(reason & OAREPORT_REASON_CTX_SWITCH))
+                     add_deltas(brw, obj, last, report);
+               } else {
+                  add_deltas(brw, obj, last, report);
+               }
+
                last = report;
             }
 
@@ -1378,12 +1486,14 @@ brw_init_performance_queries(struct brw_context *brw)
 
    init_dev_info(brw);
 
-   if (brw->gen == 6) {
+   switch (brw->gen) {
+   case 6:
       add_pipeline_statistics_query(brw, "Gen6 Pipeline Statistics Registers",
                                     gen6_pipeline_statistics,
                                     (sizeof(gen6_pipeline_statistics)/
                                      sizeof(gen6_pipeline_statistics[0])));
-   } else if (brw->gen == 7) {
+      break;
+   case 7:
       add_pipeline_statistics_query(brw, "Gen7 Pipeline Statistics Registers",
                                     gen7_pipeline_statistics,
                                     (sizeof(gen7_pipeline_statistics)/
@@ -1397,6 +1507,18 @@ brw_init_performance_queries(struct brw_context *brw)
          brw_oa_add_memory_writes_counter_query_hsw(brw);
          brw_oa_add_sampler_balance_counter_query_hsw(brw);
       }
+      break;
+   case 8:
+      add_pipeline_statistics_query(brw, "Gen8 Pipeline Statistics Registers",
+                                    gen7_pipeline_statistics,
+                                    (sizeof(gen7_pipeline_statistics)/
+                                     sizeof(gen7_pipeline_statistics[0])));
+
+      if (!brw->is_cherryview)
+         brw_oa_add_render_basic_counter_query_bdw(brw);
+      break;
+   default:
+      unreachable("Unexpected gen during performance queries init");
    }
 
    ctx->PerfQuery.NumQueries = brw->perfquery.n_queries;
