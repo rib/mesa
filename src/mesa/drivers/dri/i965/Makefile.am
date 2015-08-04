@@ -44,6 +44,8 @@ AM_CXXFLAGS = $(AM_CFLAGS)
 EXTRA_DIST = \
 	brw_oa_hsw.xml \
 	brw_oa_bdw.xml \
+	brw_oa_chv.xml \
+	brw_oa_skl.xml \
 	brw_oa.py
 
 noinst_LTLIBRARIES = libi965_dri.la
