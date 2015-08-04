@@ -65,6 +65,8 @@
 #include "brw_performance_query.h"
 #include "brw_oa_hsw.h"
 #include "brw_oa_bdw.h"
+#include "brw_oa_chv.h"
+#include "brw_oa_skl.h"
 #include "intel_batchbuffer.h"
 
 #define FILE_DEBUG_FLAG DEBUG_PERFMON
@@ -1514,8 +1516,13 @@ brw_init_performance_queries(struct brw_context *brw)
                                     (sizeof(gen7_pipeline_statistics)/
                                      sizeof(gen7_pipeline_statistics[0])));
 
-      if (!brw->is_cherryview)
+      if (brw->is_cherryview)
+         brw_oa_add_render_basic_counter_query_chv(brw);
+      else
          brw_oa_add_render_basic_counter_query_bdw(brw);
+      break;
+   case 9:
+      brw_oa_add_render_basic_counter_query_skl(brw);
       break;
    default:
       unreachable("Unexpected gen during performance queries init");
