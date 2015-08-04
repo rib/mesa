@@ -213,3 +213,10 @@ brw_oa_skl.h brw_oa_skl.c: brw_oa_skl.xml brw_oa.py Makefile
 	   --code=$(builddir)/brw_oa_skl.c \
 	   --chipset="skl" \
 	   $(srcdir)/brw_oa_skl.xml
+
+brw_oa_bxt.h brw_oa_bxt.c: brw_oa_bxt.xml brw_oa.py Makefile
+	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py \
+	   --header=$(builddir)/brw_oa_bxt.h \
+	   --code=$(builddir)/brw_oa_bxt.c \
+	   --chipset="bxt" \
+	   $(srcdir)/brw_oa_bxt.xml
