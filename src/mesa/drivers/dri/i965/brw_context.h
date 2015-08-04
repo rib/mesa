@@ -972,6 +972,7 @@ struct brw_perf_query
 
    /* For indexing into the accumulator[] ... */
    int gpu_time_offset;
+   int gpu_clock_offset;
    int a_offset;
    int b_offset;
    int c_offset;
