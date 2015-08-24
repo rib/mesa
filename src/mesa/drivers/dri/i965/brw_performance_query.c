@@ -773,17 +773,28 @@ accumulate_oa_snapshots(struct brw_context *brw,
                goto end;
 
             if (timestamp > start_timestamp) {
-               uint32_t reason = (report[0] >> OAREPORT_REASON_SHIFT) &
-                  OAREPORT_REASON_MASK;
 
                /* Since the counters continue while other contexts are
                 * running we need to discount any unrelated delta. The
                 * hardware automatically generates a report on context
                 * switch which gives us a new reference point to
                 * continuing adding deltas from.
+                *
+                * Note: Haswell doesn't report a reason within the
+                * RPT_ID field but on haswell we're relying on the
+                * hardware to filter per-context metrics for us
+                * instead.
                 */
-               if (!(reason & OAREPORT_REASON_CTX_SWITCH))
+
+               if (brw->gen >= 8) {
+                  uint32_t reason = (report[0] >> OAREPORT_REASON_SHIFT) &
+                     OAREPORT_REASON_MASK;
+
+                  if (!(reason & OAREPORT_REASON_CTX_SWITCH))
+                     add_deltas(brw, obj, last, report);
+               } else {
                   add_deltas(brw, obj, last, report);
+               }
 
                last = report;
             }
