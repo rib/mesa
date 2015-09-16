@@ -1420,7 +1420,7 @@ struct brw_context
       struct brw_perf_query queries[MAX_PERF_QUERIES];
       int n_queries;
 
-      /* The i915_oa perf event we open to setup + enable the OA counters */
+      /* The i915 perf event we open to setup + enable the OA counters */
       int perf_oa_event_fd;
 
       /* An i915_oa perf event fd gives exclusive access to the OA unit that
@@ -1430,10 +1430,11 @@ struct brw_context
       int perf_oa_metrics_set;
       int perf_oa_format;
 
-      /* The mmaped circular buffer for collecting samples from perf */
-      uint8_t *perf_oa_mmap_base;
-      size_t perf_oa_buffer_size;
-      struct perf_event_mmap_page *perf_oa_mmap_page;
+      /* List of buffers containing OA reports */
+      struct exec_list sample_buffers;
+
+      /* Cached list of empty sample buffers */
+      struct exec_list free_sample_buffers;
 
       int n_active_oa_queries;
       int n_active_pipeline_stats_queries;

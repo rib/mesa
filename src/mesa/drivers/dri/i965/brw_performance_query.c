@@ -39,8 +39,6 @@
  * though notably we currently only support OA counters for Haswell+)
  */
 
-#include <linux/perf_event.h>
-
 #include <limits.h>
 
 #include <asm/unistd.h>
@@ -51,6 +49,7 @@
 #include <sys/ioctl.h>
 
 #include <xf86drm.h>
+#include <i915_drm.h>
 
 #include "main/hash.h"
 #include "main/macros.h"
@@ -59,6 +58,8 @@
 
 #include "util/bitset.h"
 #include "util/ralloc.h"
+
+#include "glsl/list.h"
 
 #include "brw_context.h"
 #include "brw_defines.h"
@@ -81,6 +82,38 @@
 #define OAREPORT_REASON_CTX_SWITCH     (1<<3)
 #define OAREPORT_REASON_GO_TRANSITION  (1<<4)
 
+/* Samples read from i915 perf file descriptor */
+struct oa_sample {
+   struct drm_i915_perf_event_header header;
+   uint8_t oa_report[];
+};
+#define MAX_OA_SAMPLE_SIZE (8 +   /* drm_i915_perf_event_header */ \
+                            256)  /* OA counter report */
+
+/**
+ * Periodic OA samples are read into these buffer structures that are
+ * appended to the brw->perfquery.sample_buffers linked list.
+ *
+ * NB: Periodic OA reports may relate to multiple queries and queries
+ * take references on a tail of this linked list by incrementing
+ * buf->refcount for one buffer in the list.
+ *
+ * A reference on any buffer effectively holds a reference on all
+ * following buffers and query with a NULL tail pointer effectively
+ * holds a reference on all buffers.
+ *
+ * After a query accumulates its samples it drops its tail reference
+ * and we remove any unneeded buffers from the tail of the list.
+ *
+ * Once we are finished with a sample buffer we cache the buffer for
+ * re-use until the next point when all query objects are deleted.
+ */
+struct brw_oa_sample_buf {
+   struct exec_node link;
+   int refcount;
+   int len;
+   uint8_t buf[MAX_OA_SAMPLE_SIZE * 15];
+};
 
 /**
  * i965 representation of a performance query object.
@@ -107,15 +140,13 @@ struct brw_perf_query_object
          int current_report_id;
 
          /**
-          * We collect periodic counter snapshots via perf so we can account
-          * for counter overflow and this is a pointer into the circular
-          * perf buffer for collecting snapshots that lie within the begin-end
-          * bounds of this query.
+          * Reference into brw->perfquery.sample_buffers list.
+          * (See struct brw_oa_sample_buf description for more details)
           */
-         unsigned int perf_tail;
+         struct exec_node *samples_tail;
 
          /**
-          * Storage the final accumulated OA counters.
+          * Storage for the final accumulated OA counters.
           */
          uint64_t accumulator[MAX_OA_REPORT_COUNTERS];
 
@@ -142,38 +173,6 @@ struct brw_perf_query_object
       } pipeline_stats;
    };
 };
-
-/* Samples read from the perf circular buffer */
-struct oa_perf_sample {
-   struct perf_event_header header;
-   uint32_t raw_size;
-   uint8_t raw_data[];
-};
-#define MAX_OA_PERF_SAMPLE_SIZE (8 +   /* perf_event_header */       \
-                                 4 +   /* raw_size */                \
-                                 256 + /* raw OA counter snapshot */ \
-                                 4)    /* alignment padding */
-
-#define TAKEN(HEAD, TAIL, POT_SIZE)	(((HEAD) - (TAIL)) & (POT_SIZE - 1))
-
-/* Note: this will equate to 0 when the buffer is exactly full... */
-#define REMAINING(HEAD, TAIL, POT_SIZE) (POT_SIZE - TAKEN (HEAD, TAIL, POT_SIZE))
-
-#if defined(__i386__)
-#define rmb()           __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
-#define mb()            __asm__ volatile("lock; addl $0,0(%%esp)" ::: "memory")
-#endif
-
-#if defined(__x86_64__)
-#define rmb()           __asm__ volatile("lfence" ::: "memory")
-#define mb()            __asm__ volatile("mfence" ::: "memory")
-#endif
-
-/* Allow building for a more recent kernel than the system headers
- * correspond too... */
-#ifndef PERF_RECORD_DEVICE
-#define PERF_RECORD_DEVICE                   14
-#endif
 
 /** Downcasting convenience macro. */
 static inline struct brw_perf_query_object *
@@ -223,6 +222,68 @@ brw_dump_perf_queries(struct brw_context *brw)
    DBG("Queries: (Open queries = %d, OA users = %d)\n",
        brw->perfquery.n_active_oa_queries, brw->perfquery.n_oa_users);
    _mesa_HashWalk(ctx->PerfQuery.Objects, dump_perf_query_callback, brw);
+}
+
+/******************************************************************************/
+
+static struct brw_oa_sample_buf *
+append_empty_sample_buf(struct brw_context *brw)
+{
+   struct exec_node *node = exec_list_pop_head(&brw->perfquery.free_sample_buffers);
+   struct brw_oa_sample_buf *buf;
+
+   if (node)
+      buf = exec_node_data(struct brw_oa_sample_buf, node, link);
+   else {
+      buf = ralloc_size(brw, sizeof(*buf));
+
+      exec_node_init(&buf->link);
+      buf->refcount = 0;
+      buf->len = 0;
+   }
+
+   exec_list_push_tail(&brw->perfquery.sample_buffers, &buf->link);
+
+   return buf;
+}
+
+static void
+reap_sample_buffer(struct brw_context *brw, struct brw_oa_sample_buf *buf)
+{
+   exec_node_remove(&buf->link);
+   exec_list_push_tail(&brw->perfquery.free_sample_buffers, &buf->link);
+}
+
+static void
+reap_tail_sample_buffers(struct brw_context *brw)
+{
+   /* Queries that have no tail pointer, effectively hold a reference
+    * to the full list of samples... */
+   for (int i = 0; i < brw->perfquery.unresolved_elements; i++) {
+      struct brw_perf_query_object *obj = brw->perfquery.unresolved[i];
+
+      if (!obj->oa.samples_tail)
+         return;
+   }
+
+   foreach_list_typed_safe(struct brw_oa_sample_buf, buf, link,
+                           &brw->perfquery.sample_buffers)
+   {
+      if (buf->refcount == 0)
+         reap_sample_buffer(brw, buf);
+      else
+         return;
+   }
+}
+
+static void
+free_sample_bufs(struct brw_context *brw)
+{
+   foreach_list_typed_safe(struct brw_oa_sample_buf, buf, link,
+                           &brw->perfquery.free_sample_buffers)
+      ralloc_free(buf);
+
+   exec_list_make_empty(&brw->perfquery.free_sample_buffers);
 }
 
 /******************************************************************************/
@@ -381,55 +442,6 @@ emit_mi_report_perf_count(struct brw_context *brw,
    intel_batchbuffer_emit_mi_flush(brw);
 }
 
-static unsigned int
-read_perf_head(struct perf_event_mmap_page *mmap_page)
-{
-   unsigned int head = (*(volatile uint64_t *)&mmap_page->data_head);
-   rmb();
-
-   return head;
-}
-
-static void
-write_perf_tail(struct perf_event_mmap_page *mmap_page,
-                unsigned int tail)
-{
-   /* Make sure we've finished reading all the sample data we
-    * we're consuming before updating the tail... */
-   mb();
-   mmap_page->data_tail = tail;
-}
-
-/* Update the real perf tail pointer according to the query tail that
- * is currently furthest behind...
- */
-static void
-update_perf_tail(struct brw_context *brw)
-{
-   unsigned int size = brw->perfquery.perf_oa_buffer_size;
-   unsigned int head = read_perf_head(brw->perfquery.perf_oa_mmap_page);
-   int straggler_taken = -1;
-   unsigned int straggler_tail;
-
-   for (int i = 0; i < brw->perfquery.unresolved_elements; i++) {
-      struct brw_perf_query_object *obj = brw->perfquery.unresolved[i];
-      int taken;
-
-      if (!obj->oa.bo)
-         continue;
-
-      taken = TAKEN(head, obj->oa.perf_tail, size);
-
-      if (taken > straggler_taken) {
-         straggler_taken = taken;
-         straggler_tail = obj->oa.perf_tail;
-      }
-   }
-
-   if (straggler_taken >= 0)
-      write_perf_tail(brw->perfquery.perf_oa_mmap_page, straggler_tail);
-}
-
 /**
  * Add a query to the global list of "unresolved queries."
  *
@@ -450,9 +462,6 @@ add_to_unresolved_query_list(struct brw_context *brw,
    }
 
    brw->perfquery.unresolved[brw->perfquery.unresolved_elements++] = obj;
-
-   if (obj->oa.bo)
-      update_perf_tail(brw);
 }
 
 /**
@@ -477,8 +486,17 @@ drop_from_unresolved_query_list(struct brw_context *brw,
       }
    }
 
-   if (obj->oa.bo)
-      update_perf_tail(brw);
+   if (obj->oa.samples_tail) {
+      struct brw_oa_sample_buf *buf =
+         exec_node_data(struct brw_oa_sample_buf, obj->oa.samples_tail, link);
+
+      assert(buf->refcount > 0);
+      buf->refcount--;
+
+      obj->oa.samples_tail = NULL;
+   }
+
+   reap_tail_sample_buffers(brw);
 }
 
 /* XXX: should we add these directly to brw_device_info maybe? */
@@ -623,7 +641,7 @@ inc_n_oa_users(struct brw_context *brw)
 {
    if (brw->perfquery.n_oa_users == 0 &&
        perf_ioctl(brw->perfquery.perf_oa_event_fd,
-                  PERF_EVENT_IOC_ENABLE, 0) < 0)
+                  I915_PERF_IOCTL_ENABLE, 0) < 0)
    {
       return false;
    }
@@ -643,7 +661,7 @@ dec_n_oa_users(struct brw_context *brw)
    --brw->perfquery.n_oa_users;
    if (brw->perfquery.n_oa_users == 0 &&
        perf_ioctl(brw->perfquery.perf_oa_event_fd,
-                  PERF_EVENT_IOC_DISABLE, 0) < 0)
+                  I915_PERF_IOCTL_DISABLE, 0) < 0)
    {
       DBG("WARNING: Error disabling i915_oa perf event: %m\n");
    }
@@ -666,6 +684,40 @@ discard_all_queries(struct brw_context *brw)
    }
 }
 
+static bool
+read_oa_samples(struct brw_context *brw)
+{
+   while (1) {
+      struct brw_oa_sample_buf *buf = append_empty_sample_buf(brw);
+      int len;
+
+      while ((len = read(brw->perfquery.perf_oa_event_fd, buf->buf,
+                         sizeof(buf->buf))) < 0 && errno == EINTR)
+         ;
+
+      if (len <= 0) {
+         reap_sample_buffer(brw, buf);
+
+         if (len < 0) {
+            if (errno == EAGAIN)
+               return true;
+            else {
+               DBG("Error reading i915 perf samples: %m\n");
+               return false;
+            }
+         } else {
+            DBG("Spurios EOF reading i915 perf samples: %m\n");
+            return false;
+         }
+      }
+
+      buf->len = len;
+   }
+
+   unreachable("not reached");
+   return false;
+}
+
 /**
  * Accumulate OA counter results from a series of snapshots.
  *
@@ -683,22 +735,16 @@ accumulate_oa_snapshots(struct brw_context *brw,
 {
    struct gl_perf_query_object *o = &obj->base;
    uint32_t *query_buffer;
-   uint8_t *data = brw->perfquery.perf_oa_mmap_base + brw->perfquery.page_size;
-   const unsigned int size = brw->perfquery.perf_oa_buffer_size;
-   const uint64_t mask = size - 1;
-   uint64_t head;
-   uint64_t tail;
    uint32_t *start;
    uint64_t start_timestamp;
    uint32_t *last;
    uint32_t *end;
    uint64_t end_timestamp;
-   uint8_t scratch[MAX_OA_PERF_SAMPLE_SIZE];
 
    assert(o->Ready);
 
-   if (fsync(brw->perfquery.perf_oa_event_fd)  < 0)
-      DBG("Failed to flush outstanding perf events: %m\n");
+   if (!read_oa_samples(brw))
+      goto error;
 
    drm_intel_bo_map(obj->oa.bo, false);
    query_buffer = obj->oa.bo->virtual;
@@ -718,55 +764,26 @@ accumulate_oa_snapshots(struct brw_context *brw,
    start_timestamp = read_report_timestamp(start);
    end_timestamp = read_report_timestamp(end);
 
-   head = read_perf_head(brw->perfquery.perf_oa_mmap_page);
-   tail = obj->oa.perf_tail;
+   /* See if we have any periodic reports to accumulate too... */
 
-   while (TAKEN(head, tail, size)) {
-      const struct perf_event_header *header =
-         (const struct perf_event_header *)(data + (tail & mask));
+   foreach_list_typed(struct brw_oa_sample_buf, buf, link,
+                      &brw->perfquery.sample_buffers)
+   {
+      int offset = 0;
 
-      assert(header->size != 0);
-      assert(header->size <= (head - tail));
+      while (offset < buf->len) {
+         const struct drm_i915_perf_event_header *header =
+            (const struct drm_i915_perf_event_header *)(buf->buf + offset);
 
-      if ((const uint8_t *)header + header->size > data + size) {
-         int before;
+         assert(header->size != 0);
+         assert(header->size <= buf->len);
 
-         if (header->size > sizeof(scratch)) {
-            DBG("Spurious sample larger than expected\n");
-            goto error;
-         }
+         offset += header->size;
 
-         before = data + size - (const uint8_t *)header;
-
-         memcpy(scratch, header, before);
-         memcpy(scratch + before, data, header->size - before);
-
-         header = (struct perf_event_header *)scratch;
-      }
-
-      switch (header->type) {
-         case PERF_RECORD_LOST: {
-            struct {
-               struct perf_event_header header;
-               uint64_t id;
-               uint64_t n_lost;
-            } *lost = (void *)header;
-
-            DBG("i915_oa: Lost %" PRIu64 " events\n", lost->n_lost);
-            goto error;
-         }
-
-         case PERF_RECORD_THROTTLE:
-            DBG("i915_oa: Sampling has been throttled\n");
-            break;
-
-         case PERF_RECORD_UNTHROTTLE:
-            DBG("i915_oa: Sampling has been unthrottled\n");
-            break;
-
-         case PERF_RECORD_SAMPLE: {
-            struct oa_perf_sample *perf_sample = (struct oa_perf_sample *)header;
-            uint32_t *report = (uint32_t *)perf_sample->raw_data;
+         switch (header->type) {
+         case DRM_I915_PERF_RECORD_SAMPLE: {
+            struct oa_sample *sample = (struct oa_sample *)header;
+            uint32_t *report = (uint32_t *)sample->oa_report;
             uint64_t timestamp = read_report_timestamp(report);
 
             if (timestamp >= end_timestamp)
@@ -802,29 +819,17 @@ accumulate_oa_snapshots(struct brw_context *brw,
             break;
          }
 
-         case PERF_RECORD_DEVICE: {
-	    struct i915_oa_event {
-		struct perf_event_header header;
-		drm_i915_oa_event_header_t oa_header;
-	    } *oa_event = (void *)header;
-
-	    switch (oa_event->oa_header.type) {
-	    case I915_OA_RECORD_BUFFER_OVERFLOW:
-		DBG("i915_oa: OA buffer overflow\n");
-		break;
-	    case I915_OA_RECORD_REPORT_LOST:
-		DBG("i915_oa: OA report lost\n");
-		break;
-	    }
-
-	    break;
-         }
+         case DRM_I915_PERF_RECORD_OA_BUFFER_OVERFLOW:
+             DBG("i915_oa: OA buffer overflow\n");
+             break;
+         case DRM_I915_PERF_RECORD_OA_REPORT_LOST:
+             DBG("i915_oa: OA report lost\n");
+             break;
 
          default:
             DBG("i915_oa: Spurious header type = %d\n", header->type);
+         }
       }
-
-      tail += header->size;
    }
 
 end:
@@ -848,40 +853,6 @@ error:
 
 /******************************************************************************/
 
-static uint64_t
-read_file_uint64 (const char *file)
-{
-   char buf[32];
-   int fd, n;
-
-   fd = open(file, 0);
-   if (fd < 0)
-      return 0;
-   n = read(fd, buf, sizeof (buf) - 1);
-   close(fd);
-   if (n < 0)
-      return 0;
-
-   buf[n] = '\0';
-   return strtoull(buf, 0, 0);
-}
-
-static uint64_t
-lookup_i915_oa_id (void)
-{
-   return read_file_uint64("/sys/bus/event_source/devices/i915_oa/type");
-}
-
-static long
-perf_event_open (struct perf_event_attr *hw_event,
-                 pid_t pid,
-                 int cpu,
-                 int group_fd,
-                 unsigned long flags)
-{
-   return syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd, flags);
-}
-
 static bool
 open_i915_oa_event(struct brw_context *brw,
                    int metrics_set,
@@ -890,56 +861,38 @@ open_i915_oa_event(struct brw_context *brw,
                    int drm_fd,
                    uint32_t ctx_id)
 {
-   struct perf_event_attr attr;
-   drm_i915_oa_attr_t oa_attr;
-   int event_fd;
-   void *mmap_base;
+   struct drm_i915_perf_open_param param;
+   struct drm_i915_perf_oa_attr oa_attr;
+   int ret;
 
-   memset(&attr, 0, sizeof(attr));
-   attr.size = sizeof(attr);
-   attr.type = lookup_i915_oa_id();
-
-   attr.sample_type = PERF_SAMPLE_RAW;
-   attr.disabled = 1;
-   attr.sample_period = 1;
-
+   memset(&param, 0, sizeof(param));
    memset(&oa_attr, 0, sizeof(oa_attr));
+
+   param.type = I915_PERF_OA_EVENT;
+
+   param.flags |= I915_PERF_FLAG_FD_CLOEXEC;
+   param.flags |= I915_PERF_FLAG_FD_NONBLOCK;
+   param.flags |= I915_PERF_FLAG_DISABLED;
+   param.flags |= I915_PERF_FLAG_SINGLE_CONTEXT;
+
+   param.sample_flags = I915_PERF_SAMPLE_OA_REPORT;
+
+   param.ctx_id = ctx_id;
+
    oa_attr.size = sizeof(oa_attr);
-
-   oa_attr.format = report_format;
+   oa_attr.flags |= I915_OA_FLAG_PERIODIC;
+   oa_attr.oa_format = report_format;
    oa_attr.metrics_set = metrics_set;
-   oa_attr.timer_exponent = period_exponent;
+   oa_attr.oa_timer_exponent = period_exponent;
+   param.attr = (uintptr_t)&oa_attr;
 
-   oa_attr.single_context = true;
-   oa_attr.ctx_id = ctx_id;
-   oa_attr.drm_fd = drm_fd;
-
-   attr.config = (uint64_t)&oa_attr;
-
-   event_fd = perf_event_open(&attr,
-                              -1, /* pid */
-                              0, /* cpu */
-                              -1, /* group fd */
-                              PERF_FLAG_FD_CLOEXEC); /* flags */
-   if (event_fd == -1) {
+   ret = perf_ioctl(drm_fd, DRM_IOCTL_I915_PERF_OPEN, &param);
+   if (ret == -1) {
       DBG("Error opening i915_oa perf event: %m\n");
       return false;
    }
 
-   /* NB: A read-write mapping ensures the kernel will stop writing data when
-    * the buffer is full, and will report samples as lost. */
-   mmap_base = mmap(NULL,
-                    brw->perfquery.perf_oa_buffer_size + brw->perfquery.page_size,
-                    PROT_READ | PROT_WRITE, MAP_SHARED, event_fd, 0);
-   if (mmap_base == MAP_FAILED) {
-      DBG("Error mapping circular buffer, %m\n");
-      close (event_fd);
-      return false;
-   }
-
-   brw->perfquery.perf_oa_event_fd = event_fd;
-   brw->perfquery.perf_oa_mmap_base = mmap_base;
-   brw->perfquery.perf_oa_mmap_page = mmap_base;
+   brw->perfquery.perf_oa_event_fd = param.fd;
 
    brw->perfquery.perf_oa_metrics_set = metrics_set;
    brw->perfquery.perf_oa_format = report_format;
@@ -1034,12 +987,13 @@ brw_begin_perf_query(struct gl_context *ctx,
                                 obj->oa.current_report_id);
       ++brw->perfquery.n_active_oa_queries;
 
-      /* Each unresolved query maintains a separate tail pointer into the
-       * circular perf sample buffer. The real tail pointer in
-       * perfquery.perf_oa_mmap_page.data_tail will correspond to the query
-       * tail that is furthest behind.
-       */
-      obj->oa.perf_tail = read_perf_head(brw->perfquery.perf_oa_mmap_page);
+      obj->oa.samples_tail = exec_list_get_head(&brw->perfquery.sample_buffers);
+      if (obj->oa.samples_tail) {
+         struct brw_oa_sample_buf *buf =
+            exec_node_data(struct brw_oa_sample_buf, obj->oa.samples_tail, link);
+
+         buf->refcount++;
+      }
 
       memset(obj->oa.accumulator, 0, sizeof(obj->oa.accumulator));
       obj->oa.results_accumulated = false;
@@ -1309,16 +1263,10 @@ static void
 close_perf(struct brw_context *brw)
 {
    if (brw->perfquery.perf_oa_event_fd != -1) {
-      if (brw->perfquery.perf_oa_mmap_base) {
-         size_t mapping_len =
-            brw->perfquery.perf_oa_buffer_size + brw->perfquery.page_size;
-
-         munmap(brw->perfquery.perf_oa_mmap_base, mapping_len);
-         brw->perfquery.perf_oa_mmap_base = NULL;
-      }
-
       close(brw->perfquery.perf_oa_event_fd);
       brw->perfquery.perf_oa_event_fd = -1;
+
+      free_sample_bufs(brw);
    }
 }
 
@@ -1535,10 +1483,12 @@ brw_init_performance_queries(struct brw_context *brw)
    brw->perfquery.unresolved_elements = 0;
    brw->perfquery.unresolved_array_size = 2;
 
+   exec_list_make_empty(&brw->perfquery.sample_buffers);
+   exec_list_make_empty(&brw->perfquery.free_sample_buffers);
+
    brw->perfquery.page_size = sysconf(_SC_PAGE_SIZE);
 
    brw->perfquery.perf_oa_event_fd = -1;
-   brw->perfquery.perf_oa_buffer_size = 1024 * 1024; /* NB: must be power of two */
 
    brw->perfquery.next_query_start_report_id = 1000;
 }
