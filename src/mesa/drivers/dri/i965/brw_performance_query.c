@@ -509,17 +509,20 @@ init_dev_info(struct brw_context *brw)
       gp.param = I915_PARAM_EU_TOTAL;
       gp.value = &n_eus;
       ret = drmIoctl(screen->fd, DRM_IOCTL_I915_GETPARAM, &gp);
-      assert(ret == 0 && n_eus > 0);
+      if (ret)
+         n_eus = 0;
 
       gp.param = I915_PARAM_SLICE_MASK;
       gp.value = &slice_mask;
       ret = drmIoctl(screen->fd, DRM_IOCTL_I915_GETPARAM, &gp);
-      assert(ret == 0 && slice_mask);
+      if (ret)
+         slice_mask = 0;
 
       brw->perfquery.devinfo.n_eus = n_eus;
       brw->perfquery.devinfo.n_eu_slices = _mesa_bitcount(slice_mask);
 #else
-      assert(0);
+      brw->perfquery.devinfo.n_eus = 0;
+      brw->perfquery.devinfo.n_eu_slices = 0;
 #endif
    }
 }
@@ -1516,13 +1519,18 @@ brw_init_performance_queries(struct brw_context *brw)
                                     (sizeof(gen7_pipeline_statistics)/
                                      sizeof(gen7_pipeline_statistics[0])));
 
-      if (brw->is_cherryview)
-         brw_oa_add_render_basic_counter_query_chv(brw);
-      else
-         brw_oa_add_render_basic_counter_query_bdw(brw);
+      /* A failure to query the number of EUs + slices implies we're not
+       * running on a suitable kernel */
+      if (brw->perfquery.devinfo.n_eus && brw->perfquery.devinfo.n_eu_slices) {
+         if (brw->is_cherryview)
+            brw_oa_add_render_basic_counter_query_chv(brw);
+         else
+            brw_oa_add_render_basic_counter_query_bdw(brw);
+      }
       break;
    case 9:
-      brw_oa_add_render_basic_counter_query_skl(brw);
+      if (brw->perfquery.devinfo.n_eus && brw->perfquery.devinfo.n_eu_slices)
+         brw_oa_add_render_basic_counter_query_skl(brw);
       break;
    default:
       unreachable("Unexpected gen during performance queries init");
