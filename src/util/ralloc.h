@@ -430,7 +430,7 @@ private:                                                                 \
 public:                                                                  \
    static void* operator new(size_t size, void *mem_ctx)                 \
    {                                                                     \
-      void *p = ralloc_size(mem_ctx, size);                              \
+      void *p = rzalloc_size(mem_ctx, size);                             \
       assert(p != NULL);                                                 \
       if (!HAS_TRIVIAL_DESTRUCTOR(TYPE))                                 \
          ralloc_set_destructor(p, _ralloc_destructor);                   \

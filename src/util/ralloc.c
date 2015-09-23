@@ -51,6 +51,20 @@ _CRTIMP int _vscprintf(const char *format, va_list argptr);
 
 #define CANARY 0x5A1106
 
+#define RALLOC_STATS_DEBUG 1
+
+
+#ifdef RALLOC_STATS_DEBUG
+size_t ralloc_total_watermark = 0;
+size_t ralloc_user_watermark = 0;
+size_t ralloc_current_total = 0;
+size_t ralloc_current_user = 0;
+size_t ralloc_overhead_watermark = 0;
+float ralloc_efficiency_watermark = 1;
+size_t ralloc_min_size = SIZE_MAX;
+size_t ralloc_max_size = 0;
+#endif
+
 struct ralloc_header
 {
 #ifdef DEBUG
@@ -68,7 +82,13 @@ struct ralloc_header
    struct ralloc_header *next;
 
    void (*destructor)(void *);
+
+#ifdef RALLOC_STATS_DEBUG
+   size_t size;
+#endif
 };
+
+#define RALLOC_STATS_PRESUMED_HEADER_SIZE 40 /* ignoring debug members */
 
 typedef struct ralloc_header ralloc_header;
 
@@ -107,8 +127,151 @@ ralloc_context(const void *ctx)
    return ralloc_size(ctx, 0);
 }
 
-void *
-ralloc_size(const void *ctx, size_t size)
+struct ralloc_allocator;
+
+struct ralloc_vtable
+{
+   void *(*alloc)(struct ralloc_allocator *allocator,
+                  const void *ctx, size_t size);
+   void *(*realloc)(struct ralloc_allocator *allocator,
+                    void *ptr,
+                    size_t size);
+   void (*free)(struct ralloc_allocator *allocator, void *ptr);
+};
+
+struct ralloc_allocator
+{
+   enum {
+      RALLOC_TYPE_GRAPH,
+      RALLOC_TYPE_STACK,
+   } type;
+
+   struct ralloc_vtable vtable;
+   //memory_stack_t *stack;
+
+   struct ralloc_allocator *prev;
+};
+
+#ifdef RALLOC_STATS_DEBUG
+static void
+update_watermarks(void)
+{
+   size_t overhead;
+   float efficiency;
+
+   if (ralloc_current_total > ralloc_total_watermark)
+      ralloc_total_watermark = ralloc_current_total;
+   if (ralloc_current_user > ralloc_user_watermark)
+      ralloc_user_watermark = ralloc_current_user;
+
+   overhead = ralloc_current_total - ralloc_current_user;
+   if (overhead > ralloc_overhead_watermark)
+      ralloc_overhead_watermark = overhead;
+   efficiency = (double)ralloc_current_user / (double)ralloc_current_total;
+   assert(efficiency != 0);
+   if (efficiency < ralloc_efficiency_watermark)
+      ralloc_efficiency_watermark = efficiency;
+}
+
+size_t sample_sizes[10001];
+int n_samples = 0;
+
+uint64_t median_accumulator;
+uint64_t n_median_accumulations;
+
+static int
+sample_sort_cb(const void *v0, const void *v1)
+{
+   const int *i0 = v0;
+   const int *i1 = v1;
+
+   return *i0 < *i1;
+}
+
+static int *histogram;
+static int histogram_len = 0;
+
+static void sample_alloc_size(int prev_size, int size)
+{
+   /* The median allocation size seems more interesting than the
+    * average since there are probably a small number of very
+    * large allocations which we aren't interested in.
+    *
+    * Not wanting to log all allocation sizes up until we exit we
+    * calculate the median every 1000 allocations and report the
+    * average, er, median, yep.
+    */
+   sample_sizes[n_samples++] = size;
+   if (n_samples == 1000) {
+      size_t median;
+
+      qsort(sample_sizes, 1000, sizeof(size_t), sample_sort_cb);
+      n_samples = 0;
+
+      median = sample_sizes[501];
+      median_accumulator += median;
+      n_median_accumulations++;
+   }
+
+   if (size > ralloc_max_size)
+      ralloc_max_size = size;
+   if (size < ralloc_min_size)
+      ralloc_min_size = size;
+
+#if 1
+   if (!histogram || size >= histogram_len) {
+      int new_len = size + 1;
+      int *tail;
+
+      histogram = realloc(histogram, new_len * sizeof(histogram[0]));
+
+      if (histogram) {
+         tail = &histogram[histogram_len];
+         memset(tail, 0, (new_len - histogram_len) * sizeof(histogram[0]));
+         histogram_len = new_len;
+      } else {
+         histogram_len = 0;
+      }
+   }
+   if (prev_size > 0)
+      histogram[prev_size]--;
+   if (histogram)
+      histogram[size]++;
+#endif
+}
+
+__attribute__((destructor)) static void
+dump_ralloc_stats(void)
+{
+   uint64_t size;
+   int i;
+   int sum = 0;
+
+   printf("ralloc user watermark = %lu\n", ralloc_user_watermark);
+   printf("ralloc total watermark = %lu\n", ralloc_total_watermark);
+   printf("ralloc overhead watermark = %lu\n", ralloc_overhead_watermark);
+   printf("ralloc efficiency watermark = %f\n", ralloc_efficiency_watermark);
+   printf("ralloc min size = %lu\n", ralloc_min_size);
+   printf("ralloc max size = %lu\n", ralloc_max_size);
+
+   size = median_accumulator / n_median_accumulations;
+
+   printf("average median-filtered size = %lu (check code to understand what that means)\n", size);
+
+   printf("histogram:\n");
+
+   for (i = 0; i < histogram_len; i++) {
+      sum += histogram[i] * i;
+      if (histogram[i])
+         printf("%7d: = %7d allocations = %7d bytes  (sum = %d)\n", i, histogram[i], histogram[i] * i, sum);
+   }
+}
+
+#endif
+
+static void *
+graph_alloc(struct ralloc_allocator *allocator,
+            const void *ctx, size_t size)
 {
    void *block = calloc(1, size + sizeof(ralloc_header));
    ralloc_header *info;
@@ -116,7 +279,9 @@ ralloc_size(const void *ctx, size_t size)
 
    if (unlikely(block == NULL))
       return NULL;
+
    info = (ralloc_header *) block;
+
    parent = ctx != NULL ? get_header(ctx) : NULL;
 
    add_child(parent, info);
@@ -124,22 +289,22 @@ ralloc_size(const void *ctx, size_t size)
 #ifdef DEBUG
    info->canary = CANARY;
 #endif
+#ifdef RALLOC_STATS_DEBUG
+   info->size = size;
+
+   ralloc_current_total += RALLOC_STATS_PRESUMED_HEADER_SIZE + size;
+   ralloc_current_user += size;
+
+   sample_alloc_size(-1, size);
+   update_watermarks();
+#endif
 
    return PTR_FROM_HEADER(info);
 }
 
-void *
-rzalloc_size(const void *ctx, size_t size)
-{
-   void *ptr = ralloc_size(ctx, size);
-   if (likely(ptr != NULL))
-      memset(ptr, 0, size);
-   return ptr;
-}
-
-/* helper function - assumes ptr != NULL */
 static void *
-resize(void *ptr, size_t size)
+graph_realloc(struct ralloc_allocator *allocator,
+              void *ptr, size_t size)
 {
    ralloc_header *child, *old, *info;
 
@@ -148,6 +313,18 @@ resize(void *ptr, size_t size)
 
    if (info == NULL)
       return NULL;
+
+#ifdef RALLOC_STATS_DEBUG
+   ralloc_current_total -= 40 + info->size;
+   ralloc_current_user -= info->size;
+   sample_alloc_size(info->size, size);
+
+   info->size = size;
+   ralloc_current_total += 40 + size;
+   ralloc_current_user += size;
+
+   update_watermarks();
+#endif
 
    /* Update parent and sibling's links to the reallocated node. */
    if (info != old && info->parent != NULL) {
@@ -166,6 +343,55 @@ resize(void *ptr, size_t size)
       child->parent = info;
 
    return PTR_FROM_HEADER(info);
+}
+
+static void
+graph_free(struct ralloc_allocator *allocator, void *ptr)
+{
+   ralloc_header *info;
+
+   info = get_header(ptr);
+
+#ifdef RALLOC_STATS_DEBUG
+   ralloc_current_total -= 40 + info->size;
+   ralloc_current_user -= info->size;
+
+   update_watermarks();
+#endif
+
+   unlink_block(info);
+   unsafe_free(info);
+}
+
+static struct ralloc_allocator graph_allocator = {
+   .type = RALLOC_TYPE_GRAPH,
+   .vtable.alloc = graph_alloc,
+   .vtable.realloc = graph_realloc,
+   .vtable.free = graph_free
+};
+
+static struct ralloc_allocator *allocator = &graph_allocator;
+
+void *
+ralloc_size(const void *ctx, size_t size)
+{
+   return allocator->vtable.alloc(allocator, ctx, size);
+}
+
+void *
+rzalloc_size(const void *ctx, size_t size)
+{
+   void *ptr = ralloc_size(ctx, size);
+   if (likely(ptr != NULL))
+      memset(ptr, 0, size);
+   return ptr;
+}
+
+/* helper function - assumes ptr != NULL */
+static void *
+resize(void *ptr, size_t size)
+{
+   return allocator->vtable.realloc(allocator, ptr, size);
 }
 
 void *
@@ -208,14 +434,10 @@ reralloc_array_size(const void *ctx, void *ptr, size_t size, unsigned count)
 void
 ralloc_free(void *ptr)
 {
-   ralloc_header *info;
-
    if (ptr == NULL)
       return;
 
-   info = get_header(ptr);
-   unlink_block(info);
-   unsafe_free(info);
+   allocator->vtable.free(allocator, ptr);
 }
 
 static void
