@@ -40,6 +40,8 @@ _CRTIMP int _vscprintf(const char *format, va_list argptr);
 #endif
 
 #include "ralloc.h"
+#include "mem-stack.h"
+#include "clist.h"
 
 #ifndef va_copy
 #ifdef __va_copy
@@ -147,7 +149,7 @@ struct ralloc_allocator
    } type;
 
    struct ralloc_vtable vtable;
-   //memory_stack_t *stack;
+   c_memory_stack_t *stack;
 
    struct ralloc_allocator *prev;
 };
@@ -371,6 +373,56 @@ static struct ralloc_allocator graph_allocator = {
 };
 
 static struct ralloc_allocator *allocator = &graph_allocator;
+
+static void *
+stack_alloc(struct ralloc_allocator *allocator,
+            const void *ctx, size_t size)
+{
+   c_memory_stack_t *stack = allocator->stack;
+
+   return c_memory_stack_alloc(stack, size);
+}
+
+static void *
+stack_realloc(struct ralloc_allocator *allocator,
+              void *ptr, size_t size)
+{
+   return NULL;
+}
+
+static void
+stack_free(struct ralloc_allocator *allocator, void *ptr)
+{
+
+}
+
+void
+ralloc_push_stack(c_memory_stack_t *stack)
+{
+   struct ralloc_allocator *stack_allocator = malloc(sizeof(*stack_allocator));
+
+   stack_allocator->type = RALLOC_TYPE_STACK;
+   stack_allocator->vtable.alloc = stack_alloc;
+   stack_allocator->vtable.realloc = stack_realloc;
+   stack_allocator->vtable.free = stack_free;
+   stack_allocator->stack = stack;
+
+   stack_allocator->prev = allocator;
+   allocator = stack_allocator;
+}
+
+void
+ralloc_pop_stack(void)
+{
+   struct ralloc_allocator *head = allocator;
+
+   assert(head && head->type == RALLOC_TYPE_STACK);
+
+   allocator = head->prev;
+
+   free(head);
+}
+
 
 void *
 ralloc_size(const void *ctx, size_t size)

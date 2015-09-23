@@ -51,6 +51,7 @@
 #include <stdbool.h>
 
 #include "macros.h"
+#include "mem-stack.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -448,5 +449,8 @@ public:                                                                  \
       ralloc_free(p);                                                    \
    }
 
+
+void ralloc_push_stack(c_memory_stack_t *stack);
+void ralloc_pop_stack(void);
 
 #endif

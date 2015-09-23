@@ -11,6 +11,10 @@ MESA_UTIL_FILES :=	\
 	macros.h \
 	mesa-sha1.c \
 	mesa-sha1.h \
+	clist.h \
+	clist.c \
+	mem-stack.h \
+	mem-stack.c \
 	ralloc.c \
 	ralloc.h \
 	register_allocate.c \
