@@ -505,41 +505,70 @@ init_dev_info(struct brw_context *brw)
 {
    const struct brw_device_info *info = brw->intelScreen->devinfo;
    __DRIscreen *screen = brw->intelScreen->driScrnPriv;
+   int threads_per_eu = 7;
 
    if (brw->is_haswell) {
       if (info->gt == 1) {
          brw->perfquery.devinfo.n_eus = 10;
          brw->perfquery.devinfo.n_eu_slices = 1;
+         brw->perfquery.devinfo.subslice_mask = 0x1;
       } else if (info->gt == 2) {
          brw->perfquery.devinfo.n_eus = 20;
          brw->perfquery.devinfo.n_eu_slices = 1;
+         brw->perfquery.devinfo.subslice_mask = 0x3;
       } else if (info->gt == 3) {
          brw->perfquery.devinfo.n_eus = 40;
          brw->perfquery.devinfo.n_eu_slices = 2;
+         brw->perfquery.devinfo.subslice_mask = 0xf;
       }
    } else {
 #ifdef I915_PARAM_EU_TOTAL
       drm_i915_getparam_t gp;
       int ret;
-      int n_eus;
-      int slice_mask;
+      int n_eus = 0;
+      int slice_mask = 0;
+      int ss_mask = 0;
+      int s_max;
+      int ss_max;
+      uint64_t subslice_mask = 0;
+      int s;
 
       gp.param = I915_PARAM_EU_TOTAL;
       gp.value = &n_eus;
       ret = drmIoctl(screen->fd, DRM_IOCTL_I915_GETPARAM, &gp);
-      assert(ret == 0 && n_eus > 0);
+      if (ret)
+         n_eus = 0;
 
       gp.param = I915_PARAM_SLICE_MASK;
       gp.value = &slice_mask;
       ret = drmIoctl(screen->fd, DRM_IOCTL_I915_GETPARAM, &gp);
-      assert(ret == 0 && slice_mask);
+      if (ret)
+         slice_mask = 0;
 
       brw->perfquery.devinfo.n_eus = n_eus;
       brw->perfquery.devinfo.n_eu_slices = _mesa_bitcount(slice_mask);
+      brw->perfquery.devinfo.slice_mask = slice_mask;
+
+      /* Note: some of the metrics we have (as described in XML)
+       * are conditional on a $SubsliceMask variable which is
+       * expected to also reflect the slice mask by packing
+       * together subslice masks for each slice in one value...
+       */
+      for (s = 0; s < s_max; s++) {
+         if (slice_mask & (1<<s)) {
+            subslice_mask |= ss_mask << (ss_max * s);
+         }
+      }
+      brw->perfquery.devinfo.subslice_mask = subslice_mask;
 #else
-      assert(0);
+      brw->perfquery.devinfo.n_eus = 0;
+      brw->perfquery.devinfo.n_eu_slices = 0;
+      brw->perfquery.devinfo.slice_mask = 0;
 #endif
    }
+
+   brw->perfquery.devinfo.eu_threads_count =
+      brw->perfquery.devinfo.n_eus * threads_per_eu;
 }
 
 static uint64_t
@@ -1424,44 +1453,42 @@ brw_init_performance_queries(struct brw_context *brw)
 
    init_dev_info(brw);
 
-   switch (brw->gen) {
-   case 6:
-      add_pipeline_statistics_query(brw, "Gen6 Pipeline Statistics Registers",
+   if (brw->gen == 6) {
+      add_pipeline_statistics_query(brw, "Pipeline Statistics Registers",
                                     gen6_pipeline_statistics,
                                     (sizeof(gen6_pipeline_statistics)/
                                      sizeof(gen6_pipeline_statistics[0])));
-      break;
-   case 7:
-      add_pipeline_statistics_query(brw, "Gen7 Pipeline Statistics Registers",
+   } else {
+      add_pipeline_statistics_query(brw, "Pipeline Statistics Registers",
                                     gen7_pipeline_statistics,
                                     (sizeof(gen7_pipeline_statistics)/
                                      sizeof(gen7_pipeline_statistics[0])));
+   }
 
-      if (brw->is_haswell) {
-         brw_oa_add_render_basic_counter_query_hsw(brw);
-         brw_oa_add_compute_basic_counter_query_hsw(brw);
-         brw_oa_add_compute_extended_counter_query_hsw(brw);
-         brw_oa_add_memory_reads_counter_query_hsw(brw);
-         brw_oa_add_memory_writes_counter_query_hsw(brw);
-         brw_oa_add_sampler_balance_counter_query_hsw(brw);
+   /* FIXME: try calling the DRM_IOCTL_I915_PERF_OPEN ioctl with an
+    * invalid event ID to check the ioctl exists.
+    *
+    * For now a failure to query the number of EUs + slices implies
+    * we're not running on a suitable kernel for capturing OA metrics
+    */
+   if (brw->perfquery.devinfo.n_eus && brw->perfquery.devinfo.n_eu_slices) {
+      switch (brw->gen) {
+      case 7:
+         if (brw->is_haswell)
+            brw_oa_add_queries_hsw(brw);
+         break;
+      case 8:
+         if (brw->is_cherryview)
+            brw_oa_add_queries_chv(brw);
+         else
+            brw_oa_add_queries_bdw(brw);
+         break;
+      case 9:
+         brw_oa_add_queries_skl(brw);
+         break;
+      default:
+         unreachable("Unexpected gen during performance queries init");
       }
-      break;
-   case 8:
-      add_pipeline_statistics_query(brw, "Gen8 Pipeline Statistics Registers",
-                                    gen7_pipeline_statistics,
-                                    (sizeof(gen7_pipeline_statistics)/
-                                     sizeof(gen7_pipeline_statistics[0])));
-
-      if (brw->is_cherryview)
-         brw_oa_add_render_basic_counter_query_chv(brw);
-      else
-         brw_oa_add_render_basic_counter_query_bdw(brw);
-      break;
-   case 9:
-      brw_oa_add_render_basic_counter_query_skl(brw);
-      break;
-   default:
-      unreachable("Unexpected gen during performance queries init");
    }
 
    ctx->PerfQuery.NumQueries = brw->perfquery.n_queries;

@@ -25,6 +25,8 @@ import xml.etree.ElementTree as ET
 import argparse
 import sys
 
+symbol_to_perf_map = { 'RenderBasic' : '3D',
+                       'ComputeBasic' : 'COMPUTE' }
 
 def print_err(*args):
     sys.stderr.write(' '.join(map(str,args)) + '\n')
@@ -38,6 +40,14 @@ def c(*args):
         for line in code.splitlines():
             text = ''.rjust(_c_indent) + line
             c_file.write(text.rstrip() + "\n")
+
+# indented, but no trailing newline...
+def c_line_start(code):
+    if c_file:
+        c_file.write(''.rjust(_c_indent) + code)
+def c_raw(code):
+    if c_file:
+        c_file.write(code)
 
 def c_indent(n):
     global _c_indent
@@ -113,8 +123,12 @@ def emit_usub(tmp_id, args):
     c("uint64_t tmp" + str(tmp_id) +" = " + args[1] + " - " + args[0] + ";")
     return tmp_id + 1
 
+def emit_umin(tmp_id, args):
+    c("uint64_t tmp" + str(tmp_id) +" = MIN(" + args[1] + ", " + args[0] + ");")
+    return tmp_id + 1
+
 ops = {}
-# n operands, type, emitter
+#             (n operands, emitter)
 ops["FADD"] = (2, emit_fadd)
 ops["FDIV"] = (2, emit_fdiv)
 ops["FMAX"] = (2, emit_fmax)
@@ -125,10 +139,40 @@ ops["UADD"] = (2, emit_uadd)
 ops["UDIV"] = (2, emit_udiv)
 ops["UMUL"] = (2, emit_umul)
 ops["USUB"] = (2, emit_usub)
+ops["UMIN"] = (2, emit_umin)
+
+def brkt(subexp):
+    if " " in subexp:
+        return "(" + subexp + ")"
+    else:
+        return subexp
+
+def splice_bitwise_and(args):
+    return brkt(args[1]) + " & " + brkt(args[0])
+
+def splice_logical_and(args):
+    return brkt(args[1]) + " && " + brkt(args[0])
+
+def splice_ult(args):
+    return brkt(args[1]) + " < " + brkt(args[0])
+
+def splice_ugte(args):
+    return brkt(args[1]) + " >= " + brkt(args[0])
+
+exp_ops = {}
+#                 (n operands, splicer)
+exp_ops["AND"]  = (2, splice_bitwise_and)
+exp_ops["UGTE"] = (2, splice_ugte)
+exp_ops["ULT"]  = (2, splice_ult)
+exp_ops["&&"]   = (2, splice_logical_and)
+
 
 hw_vars = {}
 hw_vars["$EuCoresTotalCount"] = "brw->perfquery.devinfo.n_eus"
 hw_vars["$EuSlicesTotalCount"] = "brw->perfquery.devinfo.n_eu_slices"
+hw_vars["$EuThreadsCount"] = "brw->perfquery.devinfo.eu_threads_count"
+hw_vars["$SliceMask"] = "brw->perfquery.devinfo.slice_mask"
+hw_vars["$SubsliceMask"] = "brw->perfquery.devinfo.subslice_mask"
 
 counter_vars = {}
 
@@ -162,12 +206,43 @@ def output_rpn_equation_code(set, counter, equation, counter_vars):
             tmp = "tmp" + str(tmp_id - 1)
             stack.append(tmp)
 
-    if tmp_id == 0:
+    if len(stack) != 1:
         raise Exception("Spurious empty rpn code for " + set.get('name') + " :: " +
                 counter.get('name') + ".\nThis is probably due to some unhandled RPN function, in the equation \"" +
-                counter.get('equation') + "\"")
+                equation + "\"")
 
-    c("\nreturn tmp" + str(tmp_id - 1) + ";")
+    value = stack.pop()
+    c("\nreturn " + value + ";")
+
+def splice_rpn_expression(set, counter, expression):
+    tokens = expression.split()
+    stack = []
+
+    for token in tokens:
+        stack.append(token)
+        while stack and stack[-1] in exp_ops:
+            op = stack.pop()
+            argc, callback = exp_ops[op]
+            args = []
+            for i in range(0, argc):
+                operand = stack.pop()
+                if operand[0] == "$":
+                    if operand in hw_vars:
+                        operand = hw_vars[operand]
+                    else:
+                        raise Exception("Failed to resolve variable " + operand + " in expression " + expression + " for " + set.get('name') + " :: " + counter.get('name'));
+                args.append(operand)
+
+            subexp = callback(args)
+
+            stack.append(subexp)
+
+    if len(stack) != 1:
+        raise Exception("Spurious empty rpn expression for " + set.get('name') + " :: " +
+                counter.get('name') + ".\nThis is probably due to some unhandled RPN operation, in the expression \"" +
+                expression + "\"")
+
+    return stack.pop()
 
 def output_counter_read(set, counter, counter_vars):
     c("\n")
@@ -194,15 +269,17 @@ def output_counter_read(set, counter, counter_vars):
 
     return read_sym
 
-
 def output_counter_max(set, counter, counter_vars):
     max_eq = counter.get('max_equation')
 
     if not max_eq:
         return "0; /* undefined */"
 
-    if max_eq == "100":
-        return "100;"
+    try:
+        val = float(max_eq)
+        return max_eq + ";"
+    except:
+        pass
 
     # We can only report constant maximum values via INTEL_performance_query
     for token in max_eq.split():
@@ -217,11 +294,7 @@ def output_counter_max(set, counter, counter_vars):
 
     c("static " + ret_type)
     max_sym = set.get('chipset').lower() + "__" + set.get('underscore_name') + "__" + counter.get('underscore_name') + "__max"
-    c(max_sym + "(struct brw_context *brw,\n")
-    c_indent(len(max_sym) + 1)
-    c("struct brw_perf_query *query,\n")
-    c("uint64_t *accumulator)\n")
-    c_outdent(len(max_sym) + 1)
+    c(max_sym + "(struct brw_context *brw)\n")
 
     c("{")
     c_indent(3)
@@ -259,7 +332,29 @@ def output_counter_report(set, counter, current_offset):
 
     semantic_type_uc = semantic_type.upper()
 
-    c("\ncounter = &query->counters[query->n_counters++];\n")
+    c("\n")
+
+    conditions = []
+    for condition in counter.findall("./condition"):
+        conditions.append(condition)
+    if len(conditions) != 0:
+        c_line_start("if (")
+        i = 1
+        for condition in conditions:
+            equation = condition.get('equation')
+            expression = splice_rpn_expression(set, counter, equation)
+            c_raw(expression)
+            if i == 1:
+                c_indent(4)
+            if i < len(conditions):
+                c_raw(" &&\n")
+            else:
+                c_raw(") {\n")
+                c_outdent(4)
+            i = i + 1
+        c_indent(3)
+
+    c("counter = &query->counters[query->n_counters++];\n")
     c("counter->oa_counter_read_" + data_type + " = " + read_funcs[counter.get('symbol_name')] + ";\n")
     c("counter->name = \"" + counter.get('name') + "\";\n")
     c("counter->desc = \"" + counter.get('description') + "\";\n")
@@ -271,15 +366,21 @@ def output_counter_report(set, counter, current_offset):
     c("counter->offset = " + str(current_offset) + ";\n")
     c("counter->size = sizeof(" + c_type + ");\n")
 
+    if len(conditions) != 0:
+        c_outdent(3);
+        c("}")
+
     return current_offset + sizeof(c_type)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("xml", help="XML description of metrics")
 parser.add_argument("--header", help="Header file to write")
 parser.add_argument("--code", help="C file to write")
-parser.add_argument("--include", help="Header name to include from C file")
+parser.add_argument("--chipset", help="Chipset to generate code for")
 
 args = parser.parse_args()
+
+chipset = args.chipset.lower()
 
 if args.header:
     header_file = open(args.header, 'w')
@@ -331,8 +432,7 @@ c(
 
 """)
 
-if args.include:
-    c("#include \"" + args.include + "\"")
+c("#include \"brw_oa_" + chipset + ".h\"")
 
 c(
 """
@@ -340,16 +440,25 @@ c(
 #include "brw_performance_query.h"
 
 
+#define MIN(a, b) ((a < b) ? (a) : (b))
 #define MAX(a, b) ((a > b) ? (a) : (b))
 
 """)
+
+def metric_set_perf_name(set):
+    name = set.get('symbol_name')
+    if name in symbol_to_perf_map:
+        return "I915_OA_METRICS_SET_" + symbol_to_perf_map[name]
+    else:
+        return "I915_OA_METRICS_SET_" + set.get('underscore_name').upper()
 
 for set in tree.findall(".//set"):
     max_values = {}
     read_funcs = {}
     counter_vars = {}
     counters = set.findall("counter")
-    chipset = set.get('chipset').lower()
+
+    assert set.get('chipset').lower() == chipset
 
     for counter in counters:
         empty_vars = {}
@@ -357,10 +466,8 @@ for set in tree.findall(".//set"):
         max_values[counter.get('symbol_name')] = output_counter_max(set, counter, empty_vars)
         counter_vars["$" + counter.get('symbol_name')] = counter
 
-    h("void brw_oa_add_" + set.get('underscore_name') + "_counter_query_" + chipset + "(struct brw_context *brw);\n")
-
-    c("\nvoid\n")
-    c("brw_oa_add_" + set.get('underscore_name') + "_counter_query_" + chipset + "(struct brw_context *brw)\n")
+    c("\nstatic void\n")
+    c("add_" + set.get('underscore_name') + "_counter_query(struct brw_context *brw)\n")
     c("{\n")
     c_indent(3)
 
@@ -374,9 +481,11 @@ for set in tree.findall(".//set"):
     c("\nquery->kind = OA_COUNTERS;\n")
     c("query->name = \"" + set.get('name') + "\";\n")
 
+    perf_id = metric_set_perf_name(set)
+
     c("query->counters = rzalloc_array(brw, struct brw_perf_query_counter, " + str(len(counters)) + ");\n")
     c("query->n_counters = 0;\n")
-    c("query->oa_metrics_set = I915_OA_METRICS_SET_3D;\n")
+    c("query->oa_metrics_set = " + perf_id + ";\n")
 
     if chipset == "hsw":
         c("""query->oa_format = I915_OA_FORMAT_A45_B8_C8;
@@ -400,7 +509,6 @@ query->c_offset = query->b_offset + 8;
 
 """)
 
-
     offset = 0
     for counter in counters:
         offset = output_counter_report(set, counter, offset)
@@ -410,4 +518,17 @@ query->c_offset = query->b_offset + 8;
 
     c_outdent(3)
     c("}\n")
+
+h("void brw_oa_add_queries_" + chipset + "(struct brw_context *brw);\n")
+
+c("\nvoid")
+c("brw_oa_add_queries_" + chipset + "(struct brw_context *brw)")
+c("{")
+c_indent(3)
+
+for set in tree.findall(".//set"):
+    c("add_" + set.get('underscore_name') + "_counter_query(brw);")
+
+c_outdent(3)
+c("}")
 

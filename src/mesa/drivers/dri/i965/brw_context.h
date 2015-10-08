@@ -1410,8 +1410,12 @@ struct brw_context
       /* Extended devinfo, needed to normalize counters aggregated across all
        * EUs/slices */
       struct {
-         int n_eus;
-         int n_eu_slices;
+         /* XXX: all uint64_t for consistent operand types in generated code */
+         uint64_t n_eus;
+         uint64_t n_eu_slices;
+         uint64_t eu_threads_count; /* n_eus * threads_per_eu */
+         uint64_t subslice_mask;
+         uint64_t slice_mask;
       } devinfo;
 
       /* The system's page size */

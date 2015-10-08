@@ -120,23 +120,31 @@ BUILT_SOURCES = \
 brw_oa_hsw.c: brw_oa_hsw.xml brw_oa.py
 	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --code=$(builddir)/brw_oa_hsw.c --include="brw_oa_hsw.h" $(srcdir)/brw_oa_hsw.xml
 
-brw_oa_hsw.h: brw_oa_hsw.xml brw_oa.py
-	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --header=$(builddir)/brw_oa_hsw.h $(srcdir)/brw_oa_hsw.xml
+brw_oa_hsw.h brw_oa_hsw.c: brw_oa_hsw.xml brw_oa.py Makefile
+	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py \
+	   --header=$(builddir)/brw_oa_hsw.h \
+	   --code=$(builddir)/brw_oa_hsw.c \
+	   --chipset="hsw" \
+	   $(srcdir)/brw_oa_hsw.xml
 
-brw_oa_bdw.c: brw_oa_bdw.xml brw_oa.py
-	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --code=$(builddir)/brw_oa_bdw.c --include="brw_oa_bdw.h" $(srcdir)/brw_oa_bdw.xml
+brw_oa_bdw.h brw_oa_bdw.c: brw_oa_bdw.xml brw_oa.py Makefile
+	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py \
+	   --header=$(builddir)/brw_oa_bdw.h \
+	   --code=$(builddir)/brw_oa_bdw.c \
+	   --chipset="bdw" \
+	   $(srcdir)/brw_oa_bdw.xml
 
-brw_oa_bdw.h: brw_oa_bdw.xml brw_oa.py
-	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --header=$(builddir)/brw_oa_bdw.h $(srcdir)/brw_oa_bdw.xml
+brw_oa_chv.h brw_oa_chv.c: brw_oa_chv.xml brw_oa.py Makefile
+	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py \
+	   --header=$(builddir)/brw_oa_chv.h \
+	   --code=$(builddir)/brw_oa_chv.c \
+	   --chipset="chv" \
+	   $(srcdir)/brw_oa_chv.xml
 
-brw_oa_chv.c: brw_oa_chv.xml brw_oa.py
-	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --code=$(builddir)/brw_oa_chv.c --include="brw_oa_chv.h" $(srcdir)/brw_oa_chv.xml
+brw_oa_skl.h brw_oa_skl.c: brw_oa_skl.xml brw_oa.py Makefile
+	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py \
+	   --header=$(builddir)/brw_oa_skl.h \
+	   --code=$(builddir)/brw_oa_skl.c \
+	   --chipset="skl" \
+	   $(srcdir)/brw_oa_skl.xml
 
-brw_oa_chv.h: brw_oa_chv.xml brw_oa.py
-	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --header=$(builddir)/brw_oa_chv.h $(srcdir)/brw_oa_chv.xml
-
-brw_oa_skl.c: brw_oa_skl.xml brw_oa.py
-	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --code=$(builddir)/brw_oa_skl.c --include="brw_oa_skl.h" $(srcdir)/brw_oa_skl.xml
-
-brw_oa_skl.h: brw_oa_skl.xml brw_oa.py
-	$(PYTHON2) $(PYTHON_FLAGS) $(srcdir)/brw_oa.py --header=$(builddir)/brw_oa_skl.h $(srcdir)/brw_oa_skl.xml
