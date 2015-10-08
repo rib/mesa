@@ -624,24 +624,12 @@ add_deltas(struct brw_context *brw,
    }
 }
 
-/* Handle restarting ioctl if interrupted... */
-static int
-perf_ioctl(int fd, unsigned long request, void *arg)
-{
-   int ret;
-
-   do {
-      ret = ioctl(fd, request, arg);
-   } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
-   return ret;
-}
-
 static bool
 inc_n_oa_users(struct brw_context *brw)
 {
    if (brw->perfquery.n_oa_users == 0 &&
-       perf_ioctl(brw->perfquery.perf_oa_event_fd,
-                  I915_PERF_IOCTL_ENABLE, 0) < 0)
+       drmIoctl(brw->perfquery.perf_oa_event_fd,
+                I915_PERF_IOCTL_ENABLE, 0) < 0)
    {
       return false;
    }
@@ -660,8 +648,8 @@ dec_n_oa_users(struct brw_context *brw)
     */
    --brw->perfquery.n_oa_users;
    if (brw->perfquery.n_oa_users == 0 &&
-       perf_ioctl(brw->perfquery.perf_oa_event_fd,
-                  I915_PERF_IOCTL_DISABLE, 0) < 0)
+       drmIoctl(brw->perfquery.perf_oa_event_fd,
+                I915_PERF_IOCTL_DISABLE, 0) < 0)
    {
       DBG("WARNING: Error disabling i915_oa perf event: %m\n");
    }
@@ -886,7 +874,7 @@ open_i915_oa_event(struct brw_context *brw,
    oa_attr.oa_timer_exponent = period_exponent;
    param.attr = (uintptr_t)&oa_attr;
 
-   ret = perf_ioctl(drm_fd, DRM_IOCTL_I915_PERF_OPEN, &param);
+   ret = drmIoctl(drm_fd, DRM_IOCTL_I915_PERF_OPEN, &param);
    if (ret == -1) {
       DBG("Error opening i915_oa perf event: %m\n");
       return false;
