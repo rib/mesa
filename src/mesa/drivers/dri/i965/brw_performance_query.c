@@ -511,14 +511,17 @@ init_dev_info(struct brw_context *brw)
       if (info->gt == 1) {
          brw->perfquery.devinfo.n_eus = 10;
          brw->perfquery.devinfo.n_eu_slices = 1;
+         brw->perfquery.devinfo.slice_mask = 0x1;
          brw->perfquery.devinfo.subslice_mask = 0x1;
       } else if (info->gt == 2) {
          brw->perfquery.devinfo.n_eus = 20;
          brw->perfquery.devinfo.n_eu_slices = 1;
+         brw->perfquery.devinfo.slice_mask = 0x1;
          brw->perfquery.devinfo.subslice_mask = 0x3;
       } else if (info->gt == 3) {
          brw->perfquery.devinfo.n_eus = 40;
          brw->perfquery.devinfo.n_eu_slices = 2;
+         brw->perfquery.devinfo.slice_mask = 0x3;
          brw->perfquery.devinfo.subslice_mask = 0xf;
       }
    } else {
@@ -528,10 +531,21 @@ init_dev_info(struct brw_context *brw)
       int n_eus = 0;
       int slice_mask = 0;
       int ss_mask = 0;
-      int s_max;
-      int ss_max;
+      int s_max = 0;
+      int ss_max = 0;
       uint64_t subslice_mask = 0;
       int s;
+
+      if (brw->is_cherryview) {
+         s_max = 1;
+         ss_max = 2;
+      } else if (brw->gen == 8) {
+         s_max = 2;
+         ss_max = 3;
+      } else if (brw->gen == 9) {
+         s_max = 3;
+         ss_max = 4;
+      }
 
       gp.param = I915_PARAM_EU_TOTAL;
       gp.value = &n_eus;
@@ -544,6 +558,12 @@ init_dev_info(struct brw_context *brw)
       ret = drmIoctl(screen->fd, DRM_IOCTL_I915_GETPARAM, &gp);
       if (ret)
          slice_mask = 0;
+
+      gp.param = I915_PARAM_SUBSLICE_MASK;
+      gp.value = &ss_mask;
+      ret = drmIoctl(screen->fd, DRM_IOCTL_I915_GETPARAM, &gp);
+      if (ret)
+         ss_mask = 0;
 
       brw->perfquery.devinfo.n_eus = n_eus;
       brw->perfquery.devinfo.n_eu_slices = _mesa_bitcount(slice_mask);
@@ -564,6 +584,7 @@ init_dev_info(struct brw_context *brw)
       brw->perfquery.devinfo.n_eus = 0;
       brw->perfquery.devinfo.n_eu_slices = 0;
       brw->perfquery.devinfo.slice_mask = 0;
+      brw->perfquery.devinfo.subslice_mask = 0;
 #endif
    }
 
