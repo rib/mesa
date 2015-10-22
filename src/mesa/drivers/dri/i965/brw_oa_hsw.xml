@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<metrics version="1444327518" merge_md5="71f1da5f04d5e4d487c89bcc941d29a9">
+<metrics version="1444835110" merge_md5="71f1da5f04d5e4d487c89bcc941d29a9">
   <set name="Render Metrics Basic Gen7.5"
        chipset="HSW"
        mdapi_supported_apis="OGL OCL IO"
@@ -70,14 +70,13 @@
              underscore_name="sampler1_bottleneck"
              units="percent"
              symbol_name="Sampler1Bottleneck"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Indicate Draw"
              mdapi_group="Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="TES Threads Dispatched"
              description="The total number of evaluation shader hardware threads dispatched."
              data_type="uint64"
@@ -346,14 +345,13 @@
              underscore_name="sampler0_busy"
              units="percent"
              symbol_name="Sampler0Busy"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Batch Frame Draw"
              mdapi_group="Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Sampler 1 Busy"
              description="The percentage of time in which sampler 1 was busy."
              data_type="float"
@@ -362,14 +360,13 @@
              underscore_name="sampler1_busy"
              units="percent"
              symbol_name="Sampler1Busy"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Batch Frame Draw"
              mdapi_group="Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="Samplers Busy"
              description="The percentage of time in which samplers were busy."
              data_type="float"
@@ -462,14 +459,13 @@
              underscore_name="sampler0_bottleneck"
              units="percent"
              symbol_name="Sampler0Bottleneck"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Indicate Draw"
              mdapi_group="Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="GS AVG Stall per Thread"
              description="The average number of cycles per hardware thread run in which geometry shaders were stalled on the EUs."
              data_type="uint64"
@@ -490,14 +486,13 @@
              underscore_name="sampler0_texels"
              units="texels"
              symbol_name="Sampler0Texels"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Draw"
              mdapi_hw_unit_type="subslice"
              mdapi_group="Sampler"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Sampler 1 Texels LOD0"
              description="The total number of texels lookups in LOD0 in sampler 1 unit."
              data_type="uint64"
@@ -505,14 +500,13 @@
              underscore_name="sampler1_texels"
              units="texels"
              symbol_name="Sampler1Texels"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Draw"
              mdapi_hw_unit_type="subslice"
              mdapi_group="Sampler"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="Sampler Texels LOD0"
              description="The total number of texels lookups in LOD0 in all sampler units."
              data_type="uint64"
@@ -3388,14 +3382,13 @@
              underscore_name="sampler3_l2_cache_misses"
              units="messages"
              symbol_name="Sampler3L2CacheMisses"
+             availability="$SubsliceMask 0x8 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Frame Batch Draw"
              mdapi_hw_unit_type="subslice"
              mdapi_group="Sampler/Sampler Cache"
-             >
-        <condition equation="$SubsliceMask 0x8 AND" />
-    </counter>
+             />
     <counter name="Alpha Test Fails"
              description="The total number of pixels dropped on post-FS alpha test."
              data_type="uint64"
@@ -3755,14 +3748,13 @@
              underscore_name="sampler2_l2_cache_misses"
              units="messages"
              symbol_name="Sampler2L2CacheMisses"
+             availability="$SubsliceMask 0x4 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Frame Batch Draw"
              mdapi_hw_unit_type="subslice"
              mdapi_group="Sampler/Sampler Cache"
-             >
-        <condition equation="$SubsliceMask 0x4 AND" />
-    </counter>
+             />
     <counter name="AVG GPU Core Frequency"
              description="Average GPU Core Frequency in the measurement."
              data_type="uint64"
@@ -3983,14 +3975,13 @@
              underscore_name="sampler1_l2_cache_misses"
              units="messages"
              symbol_name="Sampler1L2CacheMisses"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Frame Batch Draw"
              mdapi_hw_unit_type="subslice"
              mdapi_group="Sampler/Sampler Cache"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="Early Hi-Depth Test Fails"
              description="The total number of pixels dropped on early hierarchical depth test."
              data_type="uint64"
@@ -4037,14 +4028,13 @@
              underscore_name="sampler0_l2_cache_misses"
              units="messages"
              symbol_name="Sampler0L2CacheMisses"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Frame Batch Draw"
              mdapi_hw_unit_type="subslice"
              mdapi_group="Sampler/Sampler Cache"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="VS AVG Active per Thread"
              description="The average number of cycles per hardware thread run in which vertex shaders were processed actively on the EUs."
              data_type="uint64"

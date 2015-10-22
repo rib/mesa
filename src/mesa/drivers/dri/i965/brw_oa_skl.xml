@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<metrics version="1444327518" merge_md5="71f1da5f04d5e4d487c89bcc941d29a9">
+<metrics version="1444835110" merge_md5="71f1da5f04d5e4d487c89bcc941d29a9">
   <set name="Render Metrics Basic Gen9"
        chipset="SKL"
        mdapi_supported_apis="OGL OCL IO"
@@ -98,14 +98,13 @@
              underscore_name="sampler1_bottleneck"
              units="percent"
              symbol_name="Sampler1Bottleneck"
+             availability="$SubsliceMask 0x12 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Indicate Draw"
              mdapi_group="Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x12 AND" />
-    </counter>
+             />
     <counter name="VS FPU1 Pipe Active"
              description="The percentage of time in which EU FPU1 pipeline was actively processing a vertex shader instruction."
              data_type="float"
@@ -208,14 +207,13 @@
              underscore_name="sampler0_busy"
              units="percent"
              symbol_name="Sampler0Busy"
+             availability="$SubsliceMask 0x09 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Batch Frame Draw"
              mdapi_group="Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x09 AND" />
-    </counter>
+             />
     <counter name="Sampler 1 Busy"
              description="The percentage of time in which Sampler 1 has been processing EU requests."
              data_type="float"
@@ -224,14 +222,13 @@
              underscore_name="sampler1_busy"
              units="percent"
              symbol_name="Sampler1Busy"
+             availability="$SubsliceMask 0x12 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Batch Frame Draw"
              mdapi_group="Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x12 AND" />
-    </counter>
+             />
     <counter name="Samplers Busy"
              description="The percentage of time in which samplers have been processing EU requests."
              data_type="float"
@@ -309,14 +306,13 @@
              underscore_name="sampler0_bottleneck"
              units="percent"
              symbol_name="Sampler0Bottleneck"
+             availability="$SubsliceMask 0x09 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Indicate Draw"
              mdapi_group="Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x09 AND" />
-    </counter>
+             />
     <counter name="Sampler Texels"
              description="The total number of texels seen on input (with 2x2 accuracy) in all sampler units."
              data_type="uint64"
@@ -4178,14 +4174,13 @@
              underscore_name="l3_bank03_accesses"
              units="messages"
              symbol_name="L3Bank03Accesses"
+             availability="$SliceMask 0x01 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier4 Frame Batch Draw"
              mdapi_hw_unit_type="slice"
              mdapi_group="L3"
-             >
-        <condition equation="$SliceMask 0x01 AND" />
-    </counter>
+             />
     <counter name="L3 Accesses"
              description="The total number of L3 accesses from all entities."
              data_type="uint64"
@@ -4395,14 +4390,13 @@
              underscore_name="l3_bank00_accesses"
              units="messages"
              symbol_name="L3Bank00Accesses"
+             availability="$SliceMask 0x01 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier4 Frame Batch Draw"
              mdapi_hw_unit_type="slice"
              mdapi_group="L3"
-             >
-        <condition equation="$SliceMask 0x01 AND" />
-    </counter>
+             />
     <counter name="EU FPU0 Move Instruction"
              description="The percentage of time in which execution units were actively processing move instructions on FPU0."
              data_type="float"
@@ -4558,14 +4552,13 @@
              underscore_name="l3_bank00_ic_accesses"
              units="messages"
              symbol_name="L3Bank00IcAccesses"
+             availability="$SliceMask 0x01 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier4 Frame Batch Draw"
              mdapi_hw_unit_type="slice"
              mdapi_group="L3/IC"
-             >
-        <condition equation="$SliceMask 0x01 AND" />
-    </counter>
+             />
     <counter name="L3 Bank 00 IC Hits"
              description="The total number of hits in L3 Bank 00 from IC cache."
              data_type="uint64"
@@ -4573,14 +4566,13 @@
              underscore_name="l3_bank00_ic_hits"
              units="messages"
              symbol_name="L3Bank00IcHits"
+             availability="$SliceMask 0x01 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier4 Frame Batch Draw"
              mdapi_hw_unit_type="slice"
              mdapi_group="L3/IC"
-             >
-        <condition equation="$SliceMask 0x01 AND" />
-    </counter>
+             />
     <counter name="Sampler Accesses"
              description="The total number of messages send to samplers."
              data_type="uint64"
@@ -4601,14 +4593,13 @@
              underscore_name="l3_bank01_accesses"
              units="messages"
              symbol_name="L3Bank01Accesses"
+             availability="$SliceMask 0x01 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier4 Frame Batch Draw"
              mdapi_hw_unit_type="slice"
              mdapi_group="L3"
-             >
-        <condition equation="$SliceMask 0x01 AND" />
-    </counter>
+             />
     <counter name="GPU Busy"
              description="The percentage of time in which the GPU has been processing GPU commands."
              data_type="float"
@@ -4750,14 +4741,13 @@
              underscore_name="l3_bank02_accesses"
              units="messages"
              symbol_name="L3Bank02Accesses"
+             availability="$SliceMask 0x01 AND"
              semantic_type="event"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier4 Frame Batch Draw"
              mdapi_hw_unit_type="slice"
              mdapi_group="L3"
-             >
-        <condition equation="$SliceMask 0x01 AND" />
-    </counter>
+             />
     <counter name="HS Threads Dispatched"
              description="The total number of hull shader hardware threads dispatched."
              data_type="uint64"
@@ -5138,14 +5128,13 @@
              underscore_name="non_sampler_shader01_access_stalled_on_l3"
              units="percent"
              symbol_name="NonSamplerShader01AccessStalledOnL3"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Data Port"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="CS Threads Dispatched"
              description="The total number of compute shader hardware threads dispatched."
              data_type="uint64"
@@ -5167,14 +5156,13 @@
              underscore_name="non_sampler_shader02_access_stalled_on_l3"
              units="percent"
              symbol_name="NonSamplerShader02AccessStalledOnL3"
+             availability="$SubsliceMask 0x4 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Data Port"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x4 AND" />
-    </counter>
+             />
     <counter name="SLM Bytes Read"
              description="The total number of GPU memory bytes read from shared local memory."
              data_type="uint64"
@@ -5510,14 +5498,13 @@
              underscore_name="non_sampler_shader00_access_stalled_on_l3"
              units="percent"
              symbol_name="NonSamplerShader00AccessStalledOnL3"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Data Port"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Samples Written"
              description="The total number of samples or pixels written to all render targets."
              data_type="uint64"
@@ -5574,14 +5561,13 @@
              underscore_name="l30_bank1_active"
              units="percent"
              symbol_name="L30Bank1Active"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GTI/L3"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="EU Both FPU Pipes Active"
              description="The percentage of time in which both EU FPU pipelines were actively processing."
              data_type="float"
@@ -5685,14 +5671,13 @@
              underscore_name="l30_bank1_stalled"
              units="percent"
              symbol_name="L30Bank1Stalled"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GTI/L3"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="FS Threads Dispatched"
              description="The total number of fragment shader hardware threads dispatched."
              data_type="uint64"
@@ -5982,14 +5967,13 @@
              underscore_name="l30_bank0_stalled"
              units="percent"
              symbol_name="L30Bank0Stalled"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GTI/L3"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="DS Threads Dispatched"
              description="The total number of domain shader hardware threads dispatched."
              data_type="uint64"
@@ -6107,14 +6091,13 @@
              underscore_name="l30_bank0_active"
              units="percent"
              symbol_name="L30Bank0Active"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GTI/L3"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="HS Threads Dispatched"
              description="The total number of hull shader hardware threads dispatched."
              data_type="uint64"
@@ -6546,14 +6529,13 @@
              underscore_name="l30_bank2_active"
              units="percent"
              symbol_name="L30Bank2Active"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GTI/L3"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="FS EU Active"
              description="The percentage of time in which fragment shaders were processed actively on the EUs."
              data_type="float"
@@ -6576,14 +6558,13 @@
              underscore_name="l30_bank2_stalled"
              units="percent"
              symbol_name="L30Bank2Stalled"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GTI/L3"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Shader Atomic Memory Accesses"
              description="The total number of shader atomic memory accesses."
              data_type="uint64"
@@ -6965,14 +6946,13 @@
              underscore_name="l30_bank3_stalled"
              units="percent"
              symbol_name="L30Bank3Stalled"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GTI/L3"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Shader Barrier Messages"
              description="The total number of shader barrier messages."
              data_type="uint64"
@@ -7277,14 +7257,13 @@
              underscore_name="l30_bank3_active"
              units="percent"
              symbol_name="L30Bank3Active"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GTI/L3"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="VS EU Active"
              description="The percentage of time in which vertex shaders were processed actively on the EUs."
              data_type="float"
@@ -7571,14 +7550,13 @@
              underscore_name="pixel_values0_ready"
              units="percent"
              symbol_name="PixelValues0Ready"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/3D Pipe"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Samples Blended"
              description="The total number of blended samples or pixels written to all render targets."
              data_type="uint64"
@@ -7691,14 +7669,13 @@
              underscore_name="rasterizer0_input_available"
              units="percent"
              symbol_name="Rasterizer0InputAvailable"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Rasterizer"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Slice0 Post-EarlyZ Pixel Data Ready"
              description="The percentage of time in which slice0 post-EarlyZ pixel data is ready (after early Z tests have been applied)"
              data_type="float"
@@ -7707,14 +7684,13 @@
              underscore_name="pixel_data0_ready"
              units="percent"
              symbol_name="PixelData0Ready"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Rasterizer/Early Depth Test"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="SLM Bytes Read"
              description="The total number of GPU memory bytes read from shared local memory."
              data_type="uint64"
@@ -7928,14 +7904,13 @@
              underscore_name="rasterizer0_output_ready"
              units="percent"
              symbol_name="Rasterizer0OutputReady"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Rasterizer"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="VS EU Active"
              description="The percentage of time in which vertex shaders were processed actively on the EUs."
              data_type="float"
@@ -8079,14 +8054,13 @@
              underscore_name="ps_output0_available"
              units="percent"
              symbol_name="PSOutput0Available"
+             availability="$SliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/3D Pipe"
              mdapi_hw_unit_type="slice"
-             >
-        <condition equation="$SliceMask 0x1 AND" />
-    </counter>
+             />
   </set>
 
   <set name="Metric set Sampler"
@@ -8130,14 +8104,13 @@
              underscore_name="sampler02_input_available"
              units="percent"
              symbol_name="Sampler02InputAvailable"
+             availability="$SubsliceMask 0x4 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x4 AND" />
-    </counter>
+             />
     <counter name="EU Both FPU Pipes Active"
              description="The percentage of time in which both EU FPU pipelines were actively processing."
              data_type="float"
@@ -8174,14 +8147,13 @@
              underscore_name="sampler00_input_available"
              units="percent"
              symbol_name="Sampler00InputAvailable"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="VS FPU1 Pipe Active"
              description="The percentage of time in which EU FPU1 pipeline was actively processing a vertex shader instruction."
              data_type="float"
@@ -8257,14 +8229,13 @@
              underscore_name="sampler02_output_ready"
              units="percent"
              symbol_name="Sampler02OutputReady"
+             availability="$SubsliceMask 0x4 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x4 AND" />
-    </counter>
+             />
     <counter name="FS Threads Dispatched"
              description="The total number of fragment shader hardware threads dispatched."
              data_type="uint64"
@@ -8312,14 +8283,13 @@
              underscore_name="sampler01_input_available"
              units="percent"
              symbol_name="Sampler01InputAvailable"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="Sampler Texels"
              description="The total number of texels seen on input (with 2x2 accuracy) in all sampler units."
              data_type="uint64"
@@ -8638,14 +8608,13 @@
              underscore_name="sampler00_output_ready"
              units="percent"
              symbol_name="Sampler00OutputReady"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="VS EU Stall"
              description="The percentage of time in which vertex shaders were stalled on the EUs."
              data_type="float"
@@ -8668,14 +8637,13 @@
              underscore_name="sampler01_output_ready"
              units="percent"
              symbol_name="Sampler01OutputReady"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Sampler"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="Shader Memory Accesses"
              description="The total number of shader memory accesses to L3."
              data_type="uint64"
@@ -8921,14 +8889,13 @@
              underscore_name="non_ps_thread02_ready_for_dispatch"
              units="percent"
              symbol_name="NonPSThread02ReadyForDispatch"
+             availability="$SubsliceMask 0x4 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x4 AND" />
-    </counter>
+             />
     <counter name="Samples Blended"
              description="The total number of blended samples or pixels written to all render targets."
              data_type="uint64"
@@ -9028,14 +8995,13 @@
              underscore_name="non_ps_thread00_ready_for_dispatch"
              units="percent"
              symbol_name="NonPSThread00ReadyForDispatch"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="CS Threads Dispatched"
              description="The total number of compute shader hardware threads dispatched."
              data_type="uint64"
@@ -9180,14 +9146,13 @@
              underscore_name="ps_thread00_ready_for_dispatch"
              units="percent"
              symbol_name="PSThread00ReadyForDispatch"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Shader Atomic Memory Accesses"
              description="The total number of shader atomic memory accesses."
              data_type="uint64"
@@ -9305,14 +9270,13 @@
              underscore_name="ps_thread01_ready_for_dispatch"
              units="percent"
              symbol_name="PSThread01ReadyForDispatch"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="VS EU Stall"
              description="The percentage of time in which vertex shaders were stalled on the EUs."
              data_type="float"
@@ -9375,14 +9339,13 @@
              underscore_name="ps_thread02_ready_for_dispatch"
              units="percent"
              symbol_name="PSThread02ReadyForDispatch"
+             availability="$SubsliceMask 0x4 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x4 AND" />
-    </counter>
+             />
     <counter name="SLM Bytes Written"
              description="The total number of GPU memory bytes written into shared local memory."
              data_type="uint64"
@@ -9445,14 +9408,13 @@
              underscore_name="non_ps_thread01_ready_for_dispatch"
              units="percent"
              symbol_name="NonPSThread01ReadyForDispatch"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
   </set>
 
   <set name="Metric set TDL_2"
@@ -9656,14 +9618,13 @@
              underscore_name="thread_header01_ready_port0"
              units="percent"
              symbol_name="ThreadHeader01ReadyPort0"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="Thread Header Ready on Slice0 Subslice1 Thread Dispatcher Port 0"
              description="The percentage of time in which thread header is ready on slice0 subslice1 thread dispatcher port 1"
              data_type="float"
@@ -9672,14 +9633,13 @@
              underscore_name="thread_header01_ready_port1"
              units="percent"
              symbol_name="ThreadHeader01ReadyPort1"
+             availability="$SubsliceMask 0x2 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x2 AND" />
-    </counter>
+             />
     <counter name="GPU Time Elapsed"
              description="Time elapsed on the GPU during the measurement."
              data_type="uint64"
@@ -9767,14 +9727,13 @@
              underscore_name="thread_header02_ready_port0"
              units="percent"
              symbol_name="ThreadHeader02ReadyPort0"
+             availability="$SubsliceMask 0x4 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x4 AND" />
-    </counter>
+             />
     <counter name="PS FPU1 Pipe Active"
              description="The percentage of time in which EU FPU1 pipeline was actively processing a pixel shader instruction."
              data_type="float"
@@ -9879,14 +9838,13 @@
              underscore_name="thread_header02_ready_port1"
              units="percent"
              symbol_name="ThreadHeader02ReadyPort1"
+             availability="$SubsliceMask 0x4 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x4 AND" />
-    </counter>
+             />
     <counter name="Shader Atomic Memory Accesses"
              description="The total number of shader atomic memory accesses."
              data_type="uint64"
@@ -10112,14 +10070,13 @@
              underscore_name="thread_header00_ready_port0"
              units="percent"
              symbol_name="ThreadHeader00ReadyPort0"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
     <counter name="Thread Header Ready on Slice0 Subslice0 Thread Dispatcher Port 1"
              description="The percentage of time in which thread header is ready on slice0 subslice0 thread dispatcher port 1"
              data_type="float"
@@ -10128,14 +10085,13 @@
              underscore_name="thread_header00_ready_port1"
              units="percent"
              symbol_name="ThreadHeader00ReadyPort1"
+             availability="$SubsliceMask 0x1 AND"
              semantic_type="duration"
              mdapi_supported_apis="OGL OCL IO"
              mdapi_usage_flags="Tier3 Frame Batch Draw"
              mdapi_group="GPU/Thread Dispatcher"
              mdapi_hw_unit_type="subslice"
-             >
-        <condition equation="$SubsliceMask 0x1 AND" />
-    </counter>
+             />
   </set>
 
 </metrics>

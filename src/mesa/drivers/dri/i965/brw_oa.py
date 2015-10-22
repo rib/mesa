@@ -334,24 +334,20 @@ def output_counter_report(set, counter, current_offset):
 
     c("\n")
 
-    conditions = []
-    for condition in counter.findall("./condition"):
-        conditions.append(condition)
-    if len(conditions) != 0:
-        c_line_start("if (")
-        i = 1
-        for condition in conditions:
-            equation = condition.get('equation')
-            expression = splice_rpn_expression(set, counter, equation)
-            c_raw(expression)
-            if i == 1:
-                c_indent(4)
-            if i < len(conditions):
-                c_raw(" &&\n")
-            else:
-                c_raw(") {\n")
-                c_outdent(4)
-            i = i + 1
+    availability = counter.get('availability')
+    if availability:
+        expression = splice_rpn_expression(set, counter, availability)
+        lines = expression.split(' && ')
+        n_lines = len(lines)
+        if n_lines == 1:
+            c("if (" + lines[0] + ") {")
+        else:
+            c("if (" + lines[0] + " &&")
+            c_indent(4)
+            for i in range(1, (n_lines - 1)):
+                c(lines[i] + " &&")
+            c(lines[(n_lines - 1)] + ") {")
+            c_outdent(4)
         c_indent(3)
 
     c("counter = &query->counters[query->n_counters++];\n")
@@ -366,7 +362,7 @@ def output_counter_report(set, counter, current_offset):
     c("counter->offset = " + str(current_offset) + ";\n")
     c("counter->size = sizeof(" + c_type + ");\n")
 
-    if len(conditions) != 0:
+    if availability:
         c_outdent(3);
         c("}")
 
