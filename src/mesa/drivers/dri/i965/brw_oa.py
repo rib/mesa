@@ -508,6 +508,11 @@ for set in tree.findall(".//set"):
     c("static struct brw_perf_query *query = &" + chipset + "_" + set.get('underscore_name') + "_query;\n")
     c("struct brw_perf_query_counter *counter;\n")
 
+    c("\nif (query->data_size)")
+    c_indent(3)
+    c("return;");
+    c_outdent(3)
+
     offset = 0
     for counter in counters:
         offset = output_counter_report(set, counter, offset)
