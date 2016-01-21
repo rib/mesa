@@ -546,7 +546,7 @@ init_oa_sys_vars(struct brw_context *brw)
          ss_max = 3;
       } else if (brw->gen == 9) {
          s_max = 3;
-         ss_max = 4;
+         ss_max = 3;
 
          /* NB: the timestamp frequency is different for Broxton */
          assert(!brw->is_broxton);
@@ -915,7 +915,7 @@ open_i915_perf_oa_stream(struct brw_context *brw,
       DRM_I915_PERF_OA_FORMAT_PROP, report_format,
       DRM_I915_PERF_OA_EXPONENT_PROP, period_exponent,
    };
-   int ret;
+   int fd;
 
    memset(&param, 0, sizeof(param));
 
@@ -926,13 +926,13 @@ open_i915_perf_oa_stream(struct brw_context *brw,
    param.properties = (uint64_t)properties;
    param.n_properties = sizeof(properties) / 16;
 
-   ret = drmIoctl(drm_fd, DRM_IOCTL_I915_PERF_OPEN, &param);
-   if (ret == -1) {
+   fd = drmIoctl(drm_fd, DRM_IOCTL_I915_PERF_OPEN, &param);
+   if (fd == -1) {
       DBG("Error opening i915 perf OA stream: %m\n");
       return false;
    }
 
-   brw->perfquery.oa_stream_fd = param.fd;
+   brw->perfquery.oa_stream_fd = fd;
 
    brw->perfquery.current_oa_metrics_set_id = metrics_set_id;
    brw->perfquery.current_oa_format = report_format;
