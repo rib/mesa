@@ -902,31 +902,26 @@ open_i915_perf_oa_stream(struct brw_context *brw,
                          int drm_fd,
                          uint32_t ctx_id)
 {
-   struct drm_i915_perf_open_param param;
    uint64_t properties[] = {
       /* Single context sampling */
-      DRM_I915_PERF_CTX_HANDLE_PROP, ctx_id,
+      DRM_I915_PERF_PROP_CTX_HANDLE, ctx_id,
 
       /* Include OA reports in samples */
-      DRM_I915_PERF_SAMPLE_OA_PROP, true,
+      DRM_I915_PERF_PROP_SAMPLE_OA, true,
 
       /* OA unit configuration */
-      DRM_I915_PERF_OA_METRICS_SET_PROP, metrics_set_id,
-      DRM_I915_PERF_OA_FORMAT_PROP, report_format,
-      DRM_I915_PERF_OA_EXPONENT_PROP, period_exponent,
+      DRM_I915_PERF_PROP_OA_METRICS_SET, metrics_set_id,
+      DRM_I915_PERF_PROP_OA_FORMAT, report_format,
+      DRM_I915_PERF_PROP_OA_EXPONENT, period_exponent,
    };
-   int fd;
-
-   memset(&param, 0, sizeof(param));
-
-   param.flags |= I915_PERF_FLAG_FD_CLOEXEC;
-   param.flags |= I915_PERF_FLAG_FD_NONBLOCK;
-   param.flags |= I915_PERF_FLAG_DISABLED;
-
-   param.properties = (uint64_t)properties;
-   param.n_properties = sizeof(properties) / 16;
-
-   fd = drmIoctl(drm_fd, DRM_IOCTL_I915_PERF_OPEN, &param);
+   struct drm_i915_perf_open_param param = {
+      .flags = I915_PERF_FLAG_FD_CLOEXEC |
+               I915_PERF_FLAG_FD_NONBLOCK |
+               I915_PERF_FLAG_DISABLED,
+      .num_properties = ARRAY_SIZE(properties) / 2,
+      .properties_ptr = (uint64_t)properties
+   };
+   int fd = drmIoctl(drm_fd, DRM_IOCTL_I915_PERF_OPEN, &param);
    if (fd == -1) {
       DBG("Error opening i915 perf OA stream: %m\n");
       return false;
