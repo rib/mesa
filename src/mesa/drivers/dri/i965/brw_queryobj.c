@@ -42,6 +42,37 @@
 #include "brw_state.h"
 #include "intel_batchbuffer.h"
 
+uint64_t
+brw_timebase_scale(struct brw_context *brw, uint64_t gpu_timestamp)
+{
+   const struct brw_device_info *devinfo = brw->intelScreen->devinfo;
+
+   return (double)gpu_timestamp * devinfo->timebase_scale;
+}
+
+/* As best we know currently, the Gen HW timestamps are 36bits across all
+ * platforms, which we need to to account for when calculating a delta to
+ * measure elapsed time.
+ *
+ * The timestamps read via glGetTimestamp() / brw_get_timestamp() sometimes
+ * only have 32bits due to a kernel bug and so in that case we make sure to
+ * treat all raw timestamps as 32bits so they overflow consistently and remain
+ * comparable.
+ */
+uint64_t
+brw_raw_timestamp_delta(struct brw_context *brw, uint64_t time0, uint64_t time1)
+{
+   if (brw->intelScreen->hw_has_timestamp == 2) {
+      /* Kernel clips timestamps to 32bits in this case */
+      return (uint32_t)time1 - (uint32_t)time0;
+   } else {
+      if (time0 > time1)
+         return (1ULL << 36) + time1 - time0;
+      else
+         return time1 - time0;
+   }
+}
+
 /**
  * Emit PIPE_CONTROLs to write the current GPU timestamp into a buffer.
  */
@@ -116,13 +147,22 @@ brw_queryobj_get_results(struct gl_context *ctx,
    case GL_TIME_ELAPSED_EXT:
       /* The query BO contains the starting and ending timestamps.
        * Subtract the two and convert to nanoseconds.
+       *
+       * TODO: check what the previous code was aiming to do incase some
+       * older gens < 6 have more funky timestamps.
+       *
+       *    1000 * ((results[1] >> 32) - (results[0] >> 32))
+       *
+       * The >>32 seems to match with what we do when hw_has_timestamp == 2
+       * but that should only matter for timestamps from the kernel.
        */
-      query->Base.Result += 1000 * ((results[1] >> 32) - (results[0] >> 32));
+      query->Base.Result = brw_raw_timestamp_delta(brw, results[0], results[1]);
+      query->Base.Result = brw_timebase_scale(brw, query->Base.Result);
       break;
 
    case GL_TIMESTAMP:
       /* The query BO contains a single timestamp value in results[0]. */
-      query->Base.Result = 1000 * (results[0] >> 32);
+      query->Base.Result = brw_timebase_scale(brw, results[0]);
       break;
 
    case GL_SAMPLES_PASSED_ARB:
@@ -508,10 +548,15 @@ brw_get_timestamp(struct gl_context *ctx)
       break;
    }
 
-   /* See logic in brw_queryobj_get_results() */
-   result *= 80;
+   /* The HW timestamp is 36 bits so just to make sure we ignore any
+    * potentially undefined data in the more significant bits...
+    *
+    * XXX: Note we were previously masking after the scale, and I'm not
+    * sure why we'd want that, so double check what we want here.
+    */
    result &= (1ull << 36) - 1;
-   return result;
+
+   return brw_timebase_scale(brw, result);
 }
 
 /**

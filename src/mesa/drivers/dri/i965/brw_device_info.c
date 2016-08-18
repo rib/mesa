@@ -35,6 +35,7 @@ static const struct brw_device_info brw_device_info_i965 = {
    .urb = {
       .size = 256,
    },
+   .timebase_scale = 80,
 };
 
 static const struct brw_device_info brw_device_info_g4x = {
@@ -50,6 +51,7 @@ static const struct brw_device_info brw_device_info_g4x = {
    .urb = {
       .size = 384,
    },
+   .timebase_scale = 80,
 };
 
 static const struct brw_device_info brw_device_info_ilk = {
@@ -64,6 +66,7 @@ static const struct brw_device_info brw_device_info_ilk = {
    .urb = {
       .size = 1024,
    },
+   .timebase_scale = 80,
 };
 
 static const struct brw_device_info brw_device_info_snb_gt1 = {
@@ -84,6 +87,7 @@ static const struct brw_device_info brw_device_info_snb_gt1 = {
       .max_vs_entries = 256,
       .max_gs_entries = 256,
    },
+   .timebase_scale = 80,
 };
 
 static const struct brw_device_info brw_device_info_snb_gt2 = {
@@ -104,6 +108,7 @@ static const struct brw_device_info brw_device_info_snb_gt2 = {
       .max_vs_entries = 256,
       .max_gs_entries = 256,
    },
+   .timebase_scale = 80,
 };
 
 #define GEN7_FEATURES                               \
@@ -112,7 +117,8 @@ static const struct brw_device_info brw_device_info_snb_gt2 = {
    .must_use_separate_stencil = true,               \
    .has_llc = true,                                 \
    .has_pln = true,                                 \
-   .has_surface_tile_offset = true
+   .has_surface_tile_offset = true,                 \
+   .timebase_scale = 80
 
 static const struct brw_device_info brw_device_info_ivb_gt1 = {
    GEN7_FEATURES, .is_ivybridge = true, .gt = 1,
@@ -253,7 +259,8 @@ static const struct brw_device_info brw_device_info_hsw_gt3 = {
    .max_hs_threads = 504,                           \
    .max_ds_threads = 504,                           \
    .max_gs_threads = 504,                           \
-   .max_wm_threads = 384
+   .max_wm_threads = 384,                           \
+   .timebase_scale = 80
 
 static const struct brw_device_info brw_device_info_bdw_gt1 = {
    GEN8_FEATURES, .gt = 1,
@@ -349,16 +356,19 @@ static const struct brw_device_info brw_device_info_skl_gt1 = {
    GEN9_FEATURES, .gt = 1,
    .num_slices = 1,
    .urb.size = 192,
+   .timebase_scale = 1000000000.0 / 12000000.0,
 };
 
 static const struct brw_device_info brw_device_info_skl_gt2 = {
    GEN9_FEATURES, .gt = 2,
    .num_slices = 1,
+   .timebase_scale = 1000000000.0 / 12000000.0,
 };
 
 static const struct brw_device_info brw_device_info_skl_gt3 = {
    GEN9_FEATURES, .gt = 3,
    .num_slices = 2,
+   .timebase_scale = 1000000000.0 / 12000000.0,
 };
 
 static const struct brw_device_info brw_device_info_skl_gt4 = {
@@ -373,6 +383,7 @@ static const struct brw_device_info brw_device_info_skl_gt4 = {
     * only 1008KB of this will be used."
     */
    .urb.size = 1008 / 3,
+   .timebase_scale = 1000000000.0 / 12000000.0,
 };
 
 static const struct brw_device_info brw_device_info_bxt = {
@@ -395,7 +406,8 @@ static const struct brw_device_info brw_device_info_bxt = {
       .max_hs_entries = 256,
       .max_ds_entries = 416,
       .max_gs_entries = 256,
-   }
+   },
+   .timebase_scale = 1000000000.0 / 19200123.0,
 };
 
 static const struct brw_device_info brw_device_info_bxt_2x6 = {
@@ -418,7 +430,8 @@ static const struct brw_device_info brw_device_info_bxt_2x6 = {
       .max_hs_entries = 128,
       .max_ds_entries = 208,
       .max_gs_entries = 128,
-   }
+   },
+   .timebase_scale = 1000000000.0 / 19200123.0,
 };
 /*
  * Note: for all KBL SKUs, the PRM says SKL for GS entries, not SKL+.

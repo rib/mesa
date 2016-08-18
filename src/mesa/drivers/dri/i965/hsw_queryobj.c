@@ -42,15 +42,15 @@ mult_gpr0_by_80(struct brw_context *brw)
    static const uint32_t maths[] = {
       MI_MATH_ALU2(LOAD, SRCA, R0),
       MI_MATH_ALU2(LOAD, SRCB, R0),
-      MI_MATH_ALU0(ADD),
+      MI_MATH_ALU0(ADD),// x 2
       MI_MATH_ALU2(STORE, R1, ACCU),
       MI_MATH_ALU2(LOAD, SRCA, R1),
       MI_MATH_ALU2(LOAD, SRCB, R1),
-      MI_MATH_ALU0(ADD),
+      MI_MATH_ALU0(ADD),// x 4
       MI_MATH_ALU2(STORE, R1, ACCU),
       MI_MATH_ALU2(LOAD, SRCA, R1),
       MI_MATH_ALU2(LOAD, SRCB, R1),
-      MI_MATH_ALU0(ADD),
+      MI_MATH_ALU0(ADD),// x 8
       MI_MATH_ALU2(STORE, R1, ACCU),
       MI_MATH_ALU2(LOAD, SRCA, R1),
       MI_MATH_ALU2(LOAD, SRCB, R1),
@@ -71,6 +71,22 @@ mult_gpr0_by_80(struct brw_context *brw)
       MI_MATH_ALU0(ADD),
       /* GPR0 = 80 * GPR0 */
       MI_MATH_ALU2(STORE, R0, ACCU),
+
+      /* For SKL we want 83.33333:
+       * For the .33333: (1/2) - (1/8) - (1/16) + (1/64) = 0.328125 close enough?
+       * Not even sure how to do RSHIFTS with this ALU atm though :-/
+       */
+
+      /* For BXT we want 52.082999677, urgh
+       * 64 - 8 - 4 + (1/16) = 52.0625 ?
+       */
+
+      /*
+       * XXX: Should we maybe even emit a perf warning for making timestamp
+       * queries this way since it seems like we're introducing a non-trival
+       * hidden cost to sampling timestamps here, which is going to get
+       * worse for gen9+
+       */
    };
 
    BEGIN_BATCH(1 + ARRAY_SIZE(maths));
@@ -245,6 +261,18 @@ hsw_result_to_gpr0(struct gl_context *ctx, struct brw_query_object *query,
       OUT_BATCH(MI_MATH_ALU0(SUB));
       OUT_BATCH(MI_MATH_ALU2(STORE, R0, ACCU));
 
+      /*
+       * XXX: Handling this on the CPU we're also taking into account that
+       * the kernel sometimes only gives us 32bit timestamps and then try
+       * ensure all our raw timestamps are masked to 32bits for consistent
+       * overflow
+       */
+
+      /*
+       * XXX: For GL_TIME_ELAPSED I think we're currently going to get
+       * incorrect results doing a 64bit SUB with 36bit operands.
+       */
+
       ADVANCE_BATCH();
    }
 
@@ -267,7 +295,12 @@ hsw_result_to_gpr0(struct gl_context *ctx, struct brw_query_object *query,
    case GL_TIMESTAMP:
       mult_gpr0_by_80(brw);
       if (query->Base.Target == GL_TIMESTAMP) {
-         keep_gpr0_lower_n_bits(brw, 36);
+
+         /* XXX: check, why are we masking the scaled timestamps in nanoseconds
+          * to 36bits
+          */
+
+          keep_gpr0_lower_n_bits(brw, 36);
       }
       break;
    case GL_ANY_SAMPLES_PASSED:

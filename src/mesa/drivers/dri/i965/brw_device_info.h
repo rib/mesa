@@ -140,6 +140,51 @@ struct brw_device_info
       unsigned max_ds_entries;
       unsigned max_gs_entries;
    } urb;
+
+   /**
+    * For the longest time the timestamp frequency for Gen's timestamp counter
+    * could be assumed to be 12.5MHz, where the least significant bit neatly
+    * corresponded to 80 nanoseconds.
+    *
+    * Since Gen9 the numbers aren't so round, with a a frequency of 12MHz for
+    * SKL (or scale factor of 80.33333333) and a frequency of 19200123Hz for
+    * BXT.
+    *
+    * For simplicty to fit with the current code scaling by a single constant
+    * to map from raw timestamps to nanoseconds we now do the conversion in
+    * floating point instead of integer arithmetic.
+    *
+    * In general it's probably worth noting that the documented constants we
+    * have for the per-platform timestamp frequencies aren't perfect and
+    * shouldn't be trusted for scaling and comparing timestamps with a large
+    * delta. Without investigated the inacurracy in detail, we at least found
+    * that plotting gpu timestamps along with CLOCK_MONOTONIC timestamps should
+    * a visible drift within ~10seconds.
+    */
+   double timebase_scale;
+
+#if 0
+   /**
+    * <STRIKE> ALU doesn't support MUL/DIV so this doesn't really help there...
+    *
+    *   To stick with uint64 arithmetic which we can also handle on the command
+    *   streamer ALU we now represent the timebase scale with a numerator and
+    *   denominator such that we can map a raw timestampe to nanoseconds with:
+    *
+    *     ns = (raw * timebase_scale_num) / timebase_scale_den
+    *
+    *   timebase_scale_num should be limited to ensure (raw * timebase_scale_num)
+    *   is <= MAX_UINT64, where raw can be assumed to be < 2^36.
+    *
+    *   Note using _num = 1000000000, _den = frequency_hz could overflow
+    *   MAX_UINT64. /= 4 on both sides is enough to be safe.
+    *
+    * </STRIKE>
+    */
+   uint64_t timebase_scale_num;
+   uint64_t timebase_scale_den;
+#endif
+
    /** @} */
 };
 
