@@ -7928,6 +7928,16 @@ ast_tcs_output_layout::hir(exec_list *instructions,
    return NULL;
 }
 
+ir_rvalue *
+ast_vs_input_layout::hir(exec_list *instructions,
+                         struct _mesa_glsl_parse_state *state)
+{
+   //YYLTYPE loc = this->get_location();
+
+   /* XXX: any further validation required? */
+
+   return NULL;
+}
 
 ir_rvalue *
 ast_gs_input_layout::hir(exec_list *instructions,

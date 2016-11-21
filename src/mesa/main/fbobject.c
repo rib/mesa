@@ -426,6 +426,15 @@ driver_RenderTexture_is_safe(const struct gl_renderbuffer_attachment *att)
  * it for determining vertical orientation, but we use ~0 to make it fairly
  * unambiguous with actual user (non-texture) renderbuffers.
  */
+/*
+ * XXX: this gets called from main/teximage.c if a texture attached to an fbo
+ * is modified e.g via glTexImage2D, in case it changes the textures size
+ * or format, potentially affecting fb completeness.
+ *
+ * This also gets called at the point of attaching a texture to an fbo but
+ * I don't understand how that's really comparable to having modified the
+ * texture.
+ */
 void
 _mesa_update_texture_renderbuffer(struct gl_context *ctx,
                                   struct gl_framebuffer *fb,
@@ -450,7 +459,19 @@ _mesa_update_texture_renderbuffer(struct gl_context *ctx,
        */
       rb->AllocStorage = NULL;
 
-      rb->NeedsFinishRenderTexture = ctx->Driver.FinishRenderTexture != NULL;
+      /* XXX: considering how this code can be called for a few different
+       * reasons that aren't strictly related to any rendering necessarily, and
+       * we're move some of the work done in RenderTexture() closer to
+       * draw_prims()/_update_state, lets comment out this mechanism for now.
+       *
+       * It looks like the FinishRenderTexture stuff may be redundant on
+       * Intel atm anyway with the render_cache that textures are flushed
+       * from by intel_update_state.
+       *
+       * TODO: tidy this up later - probably uncommenting but no longer
+       * using the RenderTexture()/FinishRenderTexture() hooks on Intel.
+       */
+      //rb->NeedsFinishRenderTexture = ctx->Driver.FinishRenderTexture != NULL;
    }
 
    if (!texImage)
@@ -465,8 +486,13 @@ _mesa_update_texture_renderbuffer(struct gl_context *ctx,
    rb->NumSamples = texImage->NumSamples;
    rb->TexImage = texImage;
 
-   if (driver_RenderTexture_is_safe(att))
-      ctx->Driver.RenderTexture(ctx, fb, att);
+   //XXX: finding it confusing how [Finish]RenderTexture stuff is being kicked
+   //while making fbo attachment changes and so going to try move all
+   //RenderTexture work into draw_prims()/_update_state for now, and can
+   //re-visit later.
+   //if (driver_RenderTexture_is_safe(att))
+   //   ctx->Driver.RenderTexture(ctx, fb, att);
+   //
 }
 
 /**
@@ -478,13 +504,20 @@ set_texture_attachment(struct gl_context *ctx,
                        struct gl_framebuffer *fb,
                        struct gl_renderbuffer_attachment *att,
                        struct gl_texture_object *texObj,
-                       GLenum texTarget, GLuint level, GLuint layer,
+                       GLenum texTarget, GLuint level,
+                       GLuint baseLayerIndex,
+                       GLuint numLayers,
                        GLboolean layered)
 {
-   struct gl_renderbuffer *rb = att->Renderbuffer;
+   //struct gl_renderbuffer *rb = att->Renderbuffer;
 
-   if (rb && rb->NeedsFinishRenderTexture)
-      ctx->Driver.FinishRenderTexture(ctx, rb);
+   /* set_texture_attachment is associated with configuring a fbo and changing
+    * attachments, not necessarily with drawing so i'm not sure why we call
+    * FinishRenderTexture() here which for intel will call
+    * intel_batchbuffer_emit_mi_flush().
+    */
+   //if (rb && rb->NeedsFinishRenderTexture)
+   //   ctx->Driver.FinishRenderTexture(ctx, rb);
 
    if (att->Texture == texObj) {
       /* re-attaching same texture */
@@ -502,7 +535,8 @@ set_texture_attachment(struct gl_context *ctx,
    /* always update these fields */
    att->TextureLevel = level;
    att->CubeMapFace = _mesa_tex_target_to_face(texTarget);
-   att->Zoffset = layer;
+   att->Zoffset = baseLayerIndex;
+   att->NumViews = numLayers;
    att->Layered = layered;
    att->Complete = GL_FALSE;
 
@@ -958,6 +992,7 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
    GLenum layer_tex_target = 0;
    bool has_depth_attachment = false;
    bool has_stencil_attachment = false;
+   GLint numViews = -1;
 
    assert(_mesa_is_user_fbo(fb));
 
@@ -1171,6 +1206,16 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
          max_layer_count = att_layer_count;
       }
 
+      if (numViews >= 0 && att->NumViews != numViews) {
+         assert(att->NumViews > 0); /* Should be error when attaching */
+         fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_VIEW_TARGETS_OVR;
+         fbo_incomplete(ctx,
+                        "framebuffer attachment view count is inconsistent",
+                        i);
+      } else {
+         numViews = att->NumViews;
+      }
+
       /*
        * The extension GL_ARB_framebuffer_no_attachments places additional
        * requirement on each attachment. Those additional requirements are
@@ -1195,6 +1240,8 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
        * Section 9.4.1 "Framebuffer Attachment Completeness", pg 310-311
        */
    }
+
+   fb->NumViews = numViews;
 
    fb->MaxNumLayers = max_layer_count;
 
@@ -2441,7 +2488,7 @@ _mesa_IsFramebuffer(GLuint framebuffer)
    return GL_FALSE;
 }
 
-
+#if 1
 /**
  * Check if any of the attachments of the given framebuffer are textures
  * (render to texture).  Call ctx->Driver.RenderTexture() for such
@@ -2489,7 +2536,7 @@ check_end_texture_render(struct gl_context *ctx, struct gl_framebuffer *fb)
       }
    }
 }
-
+#endif
 
 static void
 bind_framebuffer(GLenum target, GLuint framebuffer, bool allow_user_names)
@@ -2582,7 +2629,11 @@ _mesa_bind_framebuffers(struct gl_context *ctx,
       FLUSH_VERTICES(ctx, _NEW_BUFFERS);
 
       /* check if old readbuffer was render-to-texture */
-      check_end_texture_render(ctx, oldReadFb);
+      /* XXX: it doesn't seem ideal to do much in response to BindFramebuffer
+       * in case it's just the application configuring fbo attachments, not
+       * necessarily immediatly preparing to draw with the fbo
+       */
+      //check_end_texture_render(ctx, oldReadFb);
 
       _mesa_reference_framebuffer(&ctx->ReadBuffer, newReadFb);
    }
@@ -2590,12 +2641,17 @@ _mesa_bind_framebuffers(struct gl_context *ctx,
    if (bindDrawBuf) {
       FLUSH_VERTICES(ctx, _NEW_BUFFERS);
 
+      /* XXX: it doesn't seem ideal to do much in response to BindFramebuffer
+       * in case it's just the application configuring fbo attachments, not
+       * necessarily immediatly preparing to draw with the fbo
+       */
+
       /* check if old framebuffer had any texture attachments */
-      if (oldDrawFb)
-         check_end_texture_render(ctx, oldDrawFb);
+      //if (oldDrawFb)
+      //   check_end_texture_render(ctx, oldDrawFb);
 
       /* check if newly bound framebuffer has any texture attachments */
-      check_begin_texture_render(ctx, newDrawFb);
+      //check_begin_texture_render(ctx, newDrawFb);
 
       _mesa_reference_framebuffer(&ctx->DrawBuffer, newDrawFb);
    }
@@ -3067,46 +3123,50 @@ check_textarget(struct gl_context *ctx, int dims, GLenum target,
  * \return true if no errors, false if errors
  */
 static bool
-check_layer(struct gl_context *ctx, GLenum target, GLint layer,
-            const char *caller)
+check_layers(struct gl_context *ctx, GLenum target, GLint baseLayerIndex,
+             GLint numLayers,
+             const char *caller)
 {
+   GLint maxLayers = 1;
+   const char *maxName = "1";
+   GLint lastLayer = baseLayerIndex + numLayers - 1;
+
    /* Page 306 (page 328 of the PDF) of the OpenGL 4.5 (Core Profile)
     * spec says:
     *
     *    "An INVALID_VALUE error is generated if texture is non-zero
     *     and layer is negative."
     */
-   if (layer < 0) {
+   if (baseLayerIndex < 0) {
       _mesa_error(ctx, GL_INVALID_VALUE,
-                  "%s(layer %u < 0)", caller, layer);
+                  "%s(layer %u < 0)", caller, baseLayerIndex);
       return false;
    }
 
-   if (target == GL_TEXTURE_3D) {
-      const GLuint maxSize = 1 << (ctx->Const.Max3DTextureLevels - 1);
-      if (layer >= maxSize) {
-         _mesa_error(ctx, GL_INVALID_VALUE,
-                     "%s(invalid layer %u)", caller, layer);
-         return false;
-      }
+   switch (target) {
+   case GL_TEXTURE_3D:
+      maxLayers = 1 << (ctx->Const.Max3DTextureLevels - 1);
+      maxName = "GL_MAX_3D_TEXTURE_SIZE";
+      break;
+
+   case GL_TEXTURE_1D_ARRAY:
+   case GL_TEXTURE_2D_ARRAY:
+   case GL_TEXTURE_CUBE_MAP_ARRAY:
+   case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+      maxLayers = ctx->Const.MaxArrayTextureLayers;
+      maxName = "GL_MAX_ARRAY_TEXTURE_LAYERS";
+      break;
+
+   case GL_TEXTURE_CUBE_MAP:
+      maxName = "6";
+      maxLayers = 6;
+      break;
    }
-   else if ((target == GL_TEXTURE_1D_ARRAY) ||
-            (target == GL_TEXTURE_2D_ARRAY) ||
-            (target == GL_TEXTURE_CUBE_MAP_ARRAY) ||
-            (target == GL_TEXTURE_2D_MULTISAMPLE_ARRAY)) {
-      if (layer >= ctx->Const.MaxArrayTextureLayers) {
-         _mesa_error(ctx, GL_INVALID_VALUE,
-                     "%s(layer %u >= GL_MAX_ARRAY_TEXTURE_LAYERS)",
-                     caller, layer);
-         return false;
-      }
-   }
-   else if (target == GL_TEXTURE_CUBE_MAP) {
-      if (layer >= 6) {
-         _mesa_error(ctx, GL_INVALID_VALUE,
-                     "%s(layer %u >= 6)", caller, layer);
-         return false;
-      }
+
+   if (lastLayer >= maxLayers) {
+      _mesa_error(ctx, GL_INVALID_VALUE,
+                  "%s(invalid layer %u >= %s)", caller, lastLayer, maxName);
+      return false;
    }
 
    return true;
@@ -3138,7 +3198,8 @@ void
 _mesa_framebuffer_texture(struct gl_context *ctx, struct gl_framebuffer *fb,
                           GLenum attachment,
                           struct gl_texture_object *texObj, GLenum textarget,
-                          GLint level, GLuint layer, GLboolean layered,
+                          GLint level, GLuint baseLayerIndex, GLuint numLayers,
+                          GLboolean layered,
                           const char *caller)
 {
    struct gl_renderbuffer_attachment *att;
@@ -3167,7 +3228,8 @@ _mesa_framebuffer_texture(struct gl_context *ctx, struct gl_framebuffer *fb,
           level == fb->Attachment[BUFFER_STENCIL].TextureLevel &&
           _mesa_tex_target_to_face(textarget) ==
           fb->Attachment[BUFFER_STENCIL].CubeMapFace &&
-          layer == fb->Attachment[BUFFER_STENCIL].Zoffset) {
+          baseLayerIndex == fb->Attachment[BUFFER_STENCIL].Zoffset &&
+          numLayers == fb->Attachment[BUFFER_STENCIL].NumViews) {
          /* The texture object is already attached to the stencil attachment
           * point. Don't create a new renderbuffer; just reuse the stencil
           * attachment's. This is required to prevent a GL error in
@@ -3180,13 +3242,15 @@ _mesa_framebuffer_texture(struct gl_context *ctx, struct gl_framebuffer *fb,
                  level == fb->Attachment[BUFFER_DEPTH].TextureLevel &&
                  _mesa_tex_target_to_face(textarget) ==
                  fb->Attachment[BUFFER_DEPTH].CubeMapFace &&
-                 layer == fb->Attachment[BUFFER_DEPTH].Zoffset) {
+                 baseLayerIndex == fb->Attachment[BUFFER_DEPTH].Zoffset &&
+                 numLayers == fb->Attachment[BUFFER_DEPTH].NumViews) {
          /* As above, but with depth and stencil transposed. */
          reuse_framebuffer_texture_attachment(fb, BUFFER_STENCIL,
                                               BUFFER_DEPTH);
       } else {
          set_texture_attachment(ctx, fb, att, texObj, textarget,
-                                level, layer, layered);
+                                level, baseLayerIndex, numLayers,
+                                layered);
 
          if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
             /* Above we created a new renderbuffer and attached it to the
@@ -3249,7 +3313,7 @@ framebuffer_texture_with_dims(int dims, GLenum target,
       if (!check_textarget(ctx, dims, texObj->Target, textarget, caller))
          return;
 
-      if ((dims == 3) && !check_layer(ctx, texObj->Target, layer, caller))
+      if ((dims == 3) && !check_layers(ctx, texObj->Target, layer, 1, caller))
          return;
 
       if (!check_level(ctx, textarget, level, caller))
@@ -3257,7 +3321,7 @@ framebuffer_texture_with_dims(int dims, GLenum target,
    }
 
    _mesa_framebuffer_texture(ctx, fb, attachment, texObj, textarget, level,
-                             layer, GL_FALSE, caller);
+                             layer, 1, GL_FALSE, caller);
 }
 
 
@@ -3317,7 +3381,7 @@ _mesa_FramebufferTextureLayer(GLenum target, GLenum attachment,
       if (!check_texture_target(ctx, texObj->Target, func))
          return;
 
-      if (!check_layer(ctx, texObj->Target, layer, func))
+      if (!check_layers(ctx, texObj->Target, layer, 1, func))
          return;
 
       if (!check_level(ctx, texObj->Target, level, func))
@@ -3331,9 +3395,8 @@ _mesa_FramebufferTextureLayer(GLenum target, GLenum attachment,
    }
 
    _mesa_framebuffer_texture(ctx, fb, attachment, texObj, textarget, level,
-                             layer, GL_FALSE, func);
+                             layer, 1, GL_FALSE, func);
 }
-
 
 void GLAPIENTRY
 _mesa_NamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment,
@@ -3359,7 +3422,7 @@ _mesa_NamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment,
       if (!check_texture_target(ctx, texObj->Target, func))
          return;
 
-      if (!check_layer(ctx, texObj->Target, layer, func))
+      if (!check_layers(ctx, texObj->Target, layer, 1, func))
          return;
 
       if (!check_level(ctx, texObj->Target, level, func))
@@ -3373,9 +3436,61 @@ _mesa_NamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment,
    }
 
    _mesa_framebuffer_texture(ctx, fb, attachment, texObj, textarget, level,
-                             layer, GL_FALSE, func);
+                             layer, 1, GL_FALSE, func);
 }
 
+void GLAPIENTRY
+_mesa_FramebufferTextureMultiviewOVR(GLenum target, GLenum attachment,
+                                     GLuint texture, GLint level,
+                                     GLint baseViewIndex,
+                                     GLsizei numViews)
+{
+   GET_CURRENT_CONTEXT(ctx);
+   struct gl_framebuffer *fb;
+   struct gl_texture_object *texObj;
+   GLenum textarget = 0;
+
+   const char *func = "glFramebufferTextureMultiview";
+
+   /* Get the framebuffer object */
+   fb = get_framebuffer_target(ctx, target);
+   if (!fb) {
+      _mesa_error(ctx, GL_INVALID_ENUM,
+                  "glFramebufferTextureMultiview(invalid target %s)",
+                  _mesa_enum_to_string(target));
+      return;
+   }
+
+   if (numViews < 1 || numViews > ctx->Const.MaxViews) {
+      _mesa_error(ctx, GL_INVALID_VALUE,
+                  "glFramebufferTextureMultiview(invalid numViews %d)",
+                  numViews);
+      return;
+   }
+
+   /* Get the texture object */
+   if (!get_texture_for_framebuffer(ctx, texture, false, func, &texObj))
+      return;
+
+   if (texObj) {
+      if (!check_texture_target(ctx, texObj->Target, func))
+         return;
+
+      if (!check_layers(ctx, texObj->Target, baseViewIndex, numViews, func))
+         return;
+
+      if (!check_level(ctx, texObj->Target, level, func))
+         return;
+
+      if (texObj->Target == GL_TEXTURE_CUBE_MAP) {
+         textarget = GL_TEXTURE_CUBE_MAP_POSITIVE_X + baseViewIndex;
+         baseViewIndex = 0;
+      }
+   }
+
+   _mesa_framebuffer_texture(ctx, fb, attachment, texObj, textarget, level,
+                             baseViewIndex, numViews, GL_FALSE, func);
+}
 
 void GLAPIENTRY
 _mesa_FramebufferTexture(GLenum target, GLenum attachment,
@@ -3416,7 +3531,7 @@ _mesa_FramebufferTexture(GLenum target, GLenum attachment,
    }
 
    _mesa_framebuffer_texture(ctx, fb, attachment, texObj, 0, level,
-                             0, layered, func);
+                             0, 1, layered, func);
 }
 
 
@@ -3456,7 +3571,7 @@ _mesa_NamedFramebufferTexture(GLuint framebuffer, GLenum attachment,
    }
 
    _mesa_framebuffer_texture(ctx, fb, attachment, texObj, 0, level,
-                             0, layered, func);
+                             0, 1, layered, func);
 }
 
 

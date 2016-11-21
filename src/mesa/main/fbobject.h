@@ -123,7 +123,10 @@ extern void
 _mesa_framebuffer_texture(struct gl_context *ctx, struct gl_framebuffer *fb,
                           GLenum attachment,
                           struct gl_texture_object *texObj, GLenum textarget,
-                          GLint level, GLuint layer, GLboolean layered,
+                          GLint level,
+                          GLuint baseLayerIndex,
+                          GLuint numLayers,
+                          GLboolean layered,
                           const char *caller);
 
 extern GLenum
@@ -237,6 +240,12 @@ _mesa_FramebufferTextureLayer(GLenum target, GLenum attachment,
 extern void GLAPIENTRY
 _mesa_NamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment,
                                    GLuint texture, GLint level, GLint layer);
+
+extern void GLAPIENTRY
+_mesa_FramebufferTextureMultiviewOVR(GLenum target, GLenum attachment,
+                                     GLuint texture, GLint level,
+                                     GLint baseViewIndex,
+                                     GLsizei numViews);
 
 extern void GLAPIENTRY
 _mesa_FramebufferTexture(GLenum target, GLenum attachment,

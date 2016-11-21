@@ -652,6 +652,7 @@ struct brw_vs_prog_data {
    bool uses_basevertex;
    bool uses_baseinstance;
    bool uses_drawid;
+   bool uses_viewid;
 };
 
 struct brw_tcs_prog_data

@@ -70,6 +70,13 @@ fs_visitor::emit_vs_system_value(int location)
       reg->offset = 0;
       vs_prog_data->uses_drawid = true;
       break;
+   case SYSTEM_VALUE_VIEW_ID:
+      /* TODO: understand the roling reg->offset here,
+       * should we pack with DrawID?
+       */
+      reg->offset = 0;
+      vs_prog_data->uses_viewid = true;
+      break;
    default:
       unreachable("not reached");
    }

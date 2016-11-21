@@ -1012,6 +1012,10 @@ builtin_variable_generator::generate_vs_special_vars()
       var = add_output(VARYING_SLOT_VIEWPORT, int_t, "gl_ViewportIndex");
       var->data.interpolation = INTERP_MODE_FLAT;
    }
+   if (state->OVR_multiview_enable) {
+      add_system_value(SYSTEM_VALUE_VIEW_ID, int_t, "gl_ViewID_OVR");
+   }
+
    if (compatibility) {
       add_input(VERT_ATTRIB_POS, vec4_t, "gl_Vertex");
       add_input(VERT_ATTRIB_NORMAL, vec3_t, "gl_Normal");

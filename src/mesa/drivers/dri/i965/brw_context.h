@@ -895,6 +895,14 @@ struct brw_context
       int gl_drawid;
       drm_intel_bo *draw_id_bo;
       uint32_t draw_id_offset;
+
+      /**
+       * The value of gl_ViewID_OVR. This always comes from its own vertex
+       * buffer since it's not part of the indirect draw parameters.
+       */
+      int gl_viewid;
+      drm_intel_bo *view_id_bo;
+      uint32_t view_id_offset;
    } draw;
 
    struct {

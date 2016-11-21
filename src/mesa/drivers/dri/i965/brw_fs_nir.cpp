@@ -138,6 +138,13 @@ emit_system_values_block(nir_block *block, fs_visitor *v)
          }
          break;
 
+      case nir_intrinsic_load_view_id:
+         assert(v->stage == MESA_SHADER_VERTEX);
+         reg = &v->nir_system_values[SYSTEM_VALUE_VIEW_ID];
+         if (reg->file == BAD_FILE)
+            *reg = *v->emit_vs_system_value(SYSTEM_VALUE_VIEW_ID);
+         break;
+
       case nir_intrinsic_load_sample_pos:
          assert(v->stage == MESA_SHADER_FRAGMENT);
          reg = &v->nir_system_values[SYSTEM_VALUE_SAMPLE_POS];
@@ -2266,7 +2273,8 @@ fs_visitor::nir_emit_vs_intrinsic(const fs_builder &bld,
    case nir_intrinsic_load_base_vertex:
    case nir_intrinsic_load_instance_id:
    case nir_intrinsic_load_base_instance:
-   case nir_intrinsic_load_draw_id: {
+   case nir_intrinsic_load_draw_id:
+   case nir_intrinsic_load_view_id: {
       gl_system_value sv = nir_system_value_from_intrinsic(instr->intrinsic);
       fs_reg val = nir_system_values[sv];
       assert(val.file != BAD_FILE);

@@ -269,6 +269,7 @@ intelInitExtensions(struct gl_context *ctx)
    ctx->Extensions.OES_texture_float_linear = true;
    ctx->Extensions.OES_texture_half_float = true;
    ctx->Extensions.OES_texture_half_float_linear = true;
+   ctx->Extensions.OVR_multiview = true;
 
    if (brw->gen >= 8)
       ctx->Const.GLSLVersion = 450;

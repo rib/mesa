@@ -606,6 +606,11 @@ struct ast_type_qualifier {
          /** \{ */
          unsigned blend_support:1; /**< Are there any blend_support_ qualifiers */
          /** \} */
+
+         /** \name Layout qualifier for GL_OVR_multiview */
+         /** \{ */
+         unsigned num_views:1;
+         /** \} */
       }
       /** \brief Set of flags, accessed by name. */
       q;
@@ -724,6 +729,11 @@ struct ast_type_qualifier {
     * This field is only valid if \c explicit_image_format is set.
     */
    glsl_base_type image_base_type;
+
+   /**
+    * The number of output views in use with this shader
+    */
+   ast_layout_expression *num_views;
 
    /** Flag to know if this represents a default value for a qualifier */
    bool is_default_qualifier;
@@ -1179,6 +1189,25 @@ public:
                           struct _mesa_glsl_parse_state *state);
 };
 
+/**
+ * AST node representing a declaration of the input layout for vertex
+ * shaders.
+ */
+class ast_vs_input_layout : public ast_node
+{
+public:
+   ast_vs_input_layout(const struct YYLTYPE &locp, unsigned num_views)
+      : num_views(num_views)
+   {
+      set_location(locp);
+   }
+
+   virtual ir_rvalue *hir(exec_list *instructions,
+                          struct _mesa_glsl_parse_state *state);
+
+private:
+   unsigned num_views;
+};
 
 /**
  * AST node representing a declaration of the input layout for geometry

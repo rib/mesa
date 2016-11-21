@@ -137,7 +137,9 @@ gen8_emit_vertices(struct brw_context *brw)
       vs_prog_data->uses_basevertex ||
       vs_prog_data->uses_baseinstance;
    const unsigned nr_buffers = brw->vb.nr_buffers +
-      uses_draw_params + vs_prog_data->uses_drawid;
+      uses_draw_params +
+      vs_prog_data->uses_drawid +
+      vs_prog_data->uses_viewid;
 
    if (nr_buffers) {
       assert(nr_buffers <= 33);
@@ -169,6 +171,14 @@ gen8_emit_vertices(struct brw_context *brw)
                                   0 /* stride */,
                                   0 /* unused */);
       }
+      if (vs_prog_data->uses_viewid) {
+         EMIT_VERTEX_BUFFER_STATE(brw, brw->vb.nr_buffers + 1,
+                                  brw->draw.view_id_bo,
+                                  brw->draw.view_id_offset,
+                                  brw->draw.view_id_bo->size,
+                                  0 /* stride */,
+                                  0 /* unused */);
+      }
       ADVANCE_BATCH();
    }
 
@@ -186,7 +196,9 @@ gen8_emit_vertices(struct brw_context *brw)
                                       vs_prog_data->uses_vertexid) &&
                                      uses_edge_flag));
    const unsigned nr_elements =
-      brw->vb.nr_enabled + needs_sgvs_element + vs_prog_data->uses_drawid;
+      brw->vb.nr_enabled + needs_sgvs_element +
+      vs_prog_data->uses_viewid +
+      vs_prog_data->uses_drawid;
 
    /* The hardware allows one more VERTEX_ELEMENTS than VERTEX_BUFFERS,
     * presumably for VertexID/InstanceID.
@@ -298,6 +310,16 @@ gen8_emit_vertices(struct brw_context *brw)
    if (vs_prog_data->uses_drawid) {
       OUT_BATCH(GEN6_VE0_VALID |
                 ((brw->vb.nr_buffers + 1) << GEN6_VE0_INDEX_SHIFT) |
+                (BRW_SURFACEFORMAT_R32_UINT << BRW_VE0_FORMAT_SHIFT));
+      OUT_BATCH((BRW_VE1_COMPONENT_STORE_SRC << BRW_VE1_COMPONENT_0_SHIFT) |
+                   (BRW_VE1_COMPONENT_STORE_0 << BRW_VE1_COMPONENT_1_SHIFT) |
+                   (BRW_VE1_COMPONENT_STORE_0 << BRW_VE1_COMPONENT_2_SHIFT) |
+                   (BRW_VE1_COMPONENT_STORE_0 << BRW_VE1_COMPONENT_3_SHIFT));
+   }
+
+   if (vs_prog_data->uses_viewid) {
+      OUT_BATCH(GEN6_VE0_VALID |
+                ((brw->vb.nr_buffers + 2) << GEN6_VE0_INDEX_SHIFT) |
                 (BRW_SURFACEFORMAT_R32_UINT << BRW_VE0_FORMAT_SHIFT));
       OUT_BATCH((BRW_VE1_COMPONENT_STORE_SRC << BRW_VE1_COMPONENT_0_SHIFT) |
                    (BRW_VE1_COMPONENT_STORE_0 << BRW_VE1_COMPONENT_1_SHIFT) |

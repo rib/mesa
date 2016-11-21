@@ -418,6 +418,10 @@ intel_alloc_window_storage(struct gl_context * ctx, struct gl_renderbuffer *rb,
 }
 
 /** Dummy function for gl_renderbuffer::AllocStorage() */
+/* if we remove the RenderTexture hook we don't get the opportunity to
+ * assign this to rb->AllocStorage, but it should be redundant anyway
+ */
+#if 0
 static GLboolean
 intel_nop_alloc_storage(struct gl_context * ctx, struct gl_renderbuffer *rb,
                         GLenum internalFormat, GLuint width, GLuint height)
@@ -429,6 +433,7 @@ intel_nop_alloc_storage(struct gl_context * ctx, struct gl_renderbuffer *rb,
    _mesa_problem(ctx, "intel_nop_alloc_storage should never be called.");
    return false;
 }
+#endif
 
 /**
  * Create a new intel_renderbuffer which corresponds to an on-screen window,
@@ -515,24 +520,44 @@ intel_new_renderbuffer(struct gl_context * ctx, GLuint name)
    return rb;
 }
 
-static bool
+/* XXX:
+ * with this no longer driver by RenderTexture() we want these details
+ * to be handled as part of state updates when we come to draw.
+ * Currently this is being called from
+ * brw_context.c:intel_update_framebuffer when _NEW_BUFFER is set,
+ * but in try_draw_prims we don't really want to be setting _NEW_BUFFER
+ * as we update the view id as that's going to involve a lot of redundant
+ * work. I think we want to somehow split up some of the responsibility
+ * of this code with some called via intel_update_framebuffer and
+ * just the bits affecting mt_level done in response to some
+ * NewDriverState instead.
+ */
+bool
 intel_renderbuffer_update_wrapper(struct brw_context *brw,
                                   struct intel_renderbuffer *irb,
                                   struct gl_texture_image *image,
-                                  uint32_t layer,
+                                  uint32_t base_layer,
+                                  int viewid,
                                   bool layered)
 {
-   struct gl_renderbuffer *rb = &irb->Base.Base;
+   //struct gl_renderbuffer *rb = &irb->Base.Base;
    struct intel_texture_image *intel_image = intel_texture_image(image);
    struct intel_mipmap_tree *mt = intel_image->mt;
    int level = image->Level;
+   int layer = base_layer + viewid;
 
-   rb->AllocStorage = intel_nop_alloc_storage;
+   //should be ok to skip, so commenting out to clarify functionality
+   //that needs to be moved into _state_update in draw_prims()
+   //rb->AllocStorage = intel_nop_alloc_storage;
 
    /* adjust for texture view parameters */
    layer += image->TexObject->MinLayer;
    level += image->TexObject->MinLevel;
 
+   /* XXX: this could have false positives I think; it does a bounds check of a
+    * logical layer with a scaled mt->level[]->depth (scaled already to account
+    * for UMS/CMS formats)
+    */
    intel_miptree_check_level_layer(mt, level, layer);
    irb->mt_level = level;
 
@@ -590,19 +615,71 @@ intel_renderbuffer_set_draw_offset(struct intel_renderbuffer *irb)
  * prepare for rendering into texture memory.  This might be called
  * many times to choose different texture levels, cube faces, etc
  * before intel_finish_render_texture() is ever called.
+ *
+ * XXX: The "and other places" nature of RenderTexture is also a little awkward
+ * as it makes the responsibilities a bit fuzzy to understand. It can be called
+ * when setting texture attachments, or binding a new draw fbo with any texture
+ * attachments. So it's not just about notifying the driver of texture
+ * attachments (to help with maintaining gl_renderbuffer wrappers for textures),
+ * it's also used to help delineate when the application begins/ends rendering
+ * to a texture so that at the end the driver can e.g. flush caches before
+ * attempting to sample from the texture.
+ *
+ * XXX: for OVR_multiview, I'm not sure we want to continue doing all this up
+ * front when switching fbo bindings and using glFramebufferTexture* to attach
+ * textures. Since (at least for the first planned iteration) we will
+ * effectively be updating all texture attachment layers as the same primitive
+ * is emitted to each view.
+ *
+ * It might anyway be good in general to defer some of this work until we
+ * really start drawing, e.g. with a slim chance the app is just binding and
+ * configuring in fbo which for some reason it doesn't end up drawing to in the
+ * end. Waiting later might also give us more info to make better decisions
+ * too, when the fbo is fully configured.
+ *
+ *
+ * Enumerating the responsibilities of this RenderTexture implementation
+ * currently:
+ * - An attempted fallback to swrast if NULL tex image miptree (I say attempted
+ *   because as far as I could tell, I don't think it would work if we hit
+ *   that path)
+ * - A layer bounds check, which I noticed doesn't take into account TexView
+ *   offsets and is comparing a logical layer number with a scaled miptree
+ *   layer number (considering planar msaa formats) so I think this first
+ *   bounds check may be redundant.
+ * - Update miptree mt_layer taking into account TexView offsets and planar
+ *   msaa formats, so the user's logical layer is mapped to an actual mt layer.
+ * - update intel_renderbuffer draw_x/y offsets according to selected level
+ *   and derived mt layer.
+ * - Update intel_renderbuffer miptree reference to renderbuffer->TexImage->mt
+ * - Allocate HiZ storage for depth textures
+ *
+ * I'm thinking we can drop the swrast fallback that I guess has been broken
+ * for while, un-noticed (todo: double check - a chance I missed some details)
+ *
+ * I think for the bounds checks we can hopefully just rely on bounds
+ * checking done for framebuffer completeness (todo: maybe propose a spec
+ * update for OVR_multiview regarding bounds checking).
+ *
+ * XXX: we should be careful to consider that for cube maps the layers will
+ * actually correspond to different TexImages, though it looks like the miptree
+ * underneath has layers (so not a miptree per TexImage?). I don't fully
+ * understand the relationship between TexImages and miptrees and layers for
+ * cube maps at the moment.
  */
 static void
 intel_render_texture(struct gl_context * ctx,
                      struct gl_framebuffer *fb,
                      struct gl_renderbuffer_attachment *att)
 {
-   struct brw_context *brw = brw_context(ctx);
+#if 0
+   //struct brw_context *brw = brw_context(ctx);
    struct gl_renderbuffer *rb = att->Renderbuffer;
-   struct intel_renderbuffer *irb = intel_renderbuffer(rb);
+   //struct intel_renderbuffer *irb = intel_renderbuffer(rb);
    struct gl_texture_image *image = rb->TexImage;
    struct intel_texture_image *intel_image = intel_texture_image(image);
    struct intel_mipmap_tree *mt = intel_image->mt;
-   int layer;
+   //int layer;
 
    (void) fb;
 
@@ -613,27 +690,69 @@ intel_render_texture(struct gl_context * ctx,
       layer = att->Zoffset;
    }
 
+   /* TODO: see if we can run through piglit with this assertion, since
+    * the fallback paths below look like they wouldn't work */
+   assert(!intel_image->mt);
+
+#if 0
    if (!intel_image->mt) {
       /* Fallback on drawing to a texture that doesn't have a miptree
        * (has a border, width/height 0, etc.)
+       *
+       * XXX: I don't currently understand how this works.
+       * _swrast_render_texture assumes that the gl_renderbuffer is the base of
+       * a swrast_renderbuffer but we've already initialized intel_renderbuffer
+       * pointer above.  (note though intel_renderbuffer(rb) called above does
+       * have runtime type checking so in a case where rb was really a
+       * swrast_renderbuffer then irb would be NULL at this point.)
+       *
+       * XXX: check what ensures consistency between ->mt == NULL and 
+       * irl == NULL
+       *
+       * XXX: actually intel_renderbuffer derives from swrast_renderbuffer
+       *
+       * XXX: looking further I still can't see how this really works
+       *
+       * Other related details:
+       *
+       * s_texrender.c:_swrast_render_texture() will replace the rb->Delete
+       * with its own implementation which just calls free(), and it seems kind
+       * of scary to conceptually hand over ownership of the allocation like
+       * that. E.g. intel_delete_renderbuffer() calls
+       * _mesa_delete_renderbuffer() as a base utility for cleaning up
+       * gl_renderbuffer state which the swrast delete_texture_wrapper()
+       * function does not call.
        */
       _swrast_render_texture(ctx, fb, att);
       return;
    }
+#endif
 
-   intel_miptree_check_level_layer(mt, att->TextureLevel, layer);
+   /* XXX: this could have false positives I think; it does a bounds check of a
+    * logical layer with a scaled mt->level[]->depth (scaled already to account
+    * for UMS/CMS formats) and layer is also not offset as it will be later
+    * acconuting for texture view properties.
+    */
+   //intel_miptree_check_level_layer(mt, att->TextureLevel, layer + i);
 
-   if (!intel_renderbuffer_update_wrapper(brw, irb, image, layer, att->Layered)) {
+#if 0
+   if (!intel_renderbuffer_update_wrapper(brw, irb, image, layer + view_id,
+                                          att->Layered)) {
+      /* XXX: more so than above, this looks suspect, since it implies we
+       * first try dereferencing the rb as an intel_renderbuffer, but then
+       * will attempt to cast to a swrast_renderbuffer
+       */
        _swrast_render_texture(ctx, fb, att);
        return;
    }
+#endif
 
-   DBG("Begin render %s texture tex=%u w=%d h=%d d=%d refcount=%d\n",
-       _mesa_get_format_name(image->TexFormat),
-       att->Texture->Name, image->Width, image->Height, image->Depth,
-       rb->RefCount);
+   //DBG("Begin render %s texture tex=%u w=%d h=%d d=%d, refcount=%d\n",
+   //    _mesa_get_format_name(image->TexFormat),
+   //    att->Texture->Name, image->Width, image->Height, image->Depth,
+   //    rb->RefCount);
+#endif
 }
-
 
 #define fbo_incomplete(fb, ...) do {                                          \
       static GLuint msg_id = 0;                                               \
@@ -992,7 +1111,18 @@ intel_renderbuffer_att_set_needs_depth_resolve(struct gl_renderbuffer_attachment
    if (irb->mt) {
       if (att->Layered) {
          intel_miptree_set_all_slices_need_depth_resolve(irb->mt, irb->mt_level);
-      } else {
+      }
+      /* TODO: potentially minimize what layers needs resolving... */
+#if 0
+      else if (att->NumViews > 1) {
+         for (int view = 0; i < att->NumViews; i++) {
+            intel_miptree_slice_set_needs_depth_resolve(irb->mt,
+                                                        irb->mt_level,
+                                                        irb->mt_layer + view);
+         }
+      } 
+#endif
+      else {
          intel_miptree_slice_set_needs_depth_resolve(irb->mt,
                                                      irb->mt_level,
                                                      irb->mt_layer);
@@ -1109,6 +1239,7 @@ intel_fbo_init(struct brw_context *brw)
    dd->MapRenderbuffer = intel_map_renderbuffer;
    dd->UnmapRenderbuffer = intel_unmap_renderbuffer;
    dd->RenderTexture = intel_render_texture;
+   //dd->UpdateRenderTextureView = intel_update_render_texture_view;
    dd->ValidateFramebuffer = intel_validate_framebuffer;
    if (brw->gen >= 6)
       dd->BlitFramebuffer = intel_blit_framebuffer;

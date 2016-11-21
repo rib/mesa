@@ -162,6 +162,37 @@ intel_update_framebuffer(struct gl_context *ctx,
 {
    struct brw_context *brw = brw_context(ctx);
 
+   /* Ensure all renderbuffer wrappers for texture attachments
+    * are up to date, and storage has been allocated
+    */
+   if (!_mesa_is_winsys_fbo(fb)) {
+      for (int i = 0; i < BUFFER_COUNT; i++) {
+         struct gl_renderbuffer_attachment *att = fb->Attachment + i;
+
+         /* What we used to do in RenderTexture()...
+          */
+         if (att->Texture && att->Renderbuffer->TexImage) {
+            struct gl_renderbuffer *rb = att->Renderbuffer;
+            struct intel_renderbuffer *irb = intel_renderbuffer(rb);
+            int layer;
+
+            if (att->CubeMapFace > 0) {
+               assert(att->Zoffset == 0);
+               layer = att->CubeMapFace;
+            } else {
+               layer = att->Zoffset;
+            }
+
+            intel_renderbuffer_update_wrapper(brw,
+                                              irb,
+                                              rb->TexImage,
+                                              layer,
+                                              brw->draw.gl_viewid,
+                                              att->Layered);
+         }
+      }
+   }
+
    /* Quantize the derived default number of samples
     */
    fb->DefaultGeometry._NumSamples =
@@ -804,6 +835,9 @@ brw_initialize_context_constants(struct brw_context *brw)
 
    /* OES_primitive_bounding_box */
    ctx->Const.NoPrimitiveBoundingBoxOutput = true;
+
+   /* OVR_multiview */
+   ctx->Const.MaxViews = MAX_VIEWS;
 }
 
 static void

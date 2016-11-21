@@ -119,7 +119,7 @@ _mesa_meta_framebuffer_texture_image(struct gl_context *ctx,
       : texObj->Target;
 
    _mesa_framebuffer_texture(ctx, fb, attachment, texObj, texTarget,
-                             level, layer, false, __func__);
+                             level, layer, 1, false, __func__);
 }
 
 static struct gl_shader *

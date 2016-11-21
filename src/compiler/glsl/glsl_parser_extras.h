@@ -392,6 +392,12 @@ struct _mesa_glsl_parse_state {
    struct ast_type_qualifier *in_qualifier;
 
    /**
+    * Defaults to 1, or set via a num_views vertex shader input layout
+    * directive.
+    */
+   unsigned vs_num_views;
+
+   /**
     * True if a compute shader input local size was specified using a layout
     * directive.
     *
@@ -767,6 +773,8 @@ struct _mesa_glsl_parse_state {
    bool MESA_shader_integer_functions_warn;
    bool NV_image_formats_enable;
    bool NV_image_formats_warn;
+   bool OVR_multiview_enable;
+   bool OVR_multiview_warn;
    /*@}*/
 
    /** Extensions supported by the OpenGL implementation. */

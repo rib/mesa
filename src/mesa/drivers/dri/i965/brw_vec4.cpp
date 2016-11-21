@@ -2146,6 +2146,15 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
       nr_attributes++;
    }
 
+   /* gl_ViewID has its very own vec4
+    * XXX: should we pack glDrawID and gl_ViewID - though not
+    * sure they are that likely to be used together.
+    */
+   if (shader->info->system_values_read &
+       BITFIELD64_BIT(SYSTEM_VALUE_VIEW_ID)) {
+      nr_attributes++;
+   }
+
    unsigned nr_attribute_slots =
       nr_attributes +
       _mesa_bitcount_64(shader->info->double_inputs_read);

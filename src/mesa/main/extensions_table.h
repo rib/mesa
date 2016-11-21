@@ -395,6 +395,7 @@ EXT(OES_texture_storage_multisample_2d_array, ARB_texture_multisample           
 EXT(OES_vertex_array_object                 , dummy_true                             ,  x ,  x , ES1, ES2, 2010)
 EXT(OES_vertex_half_float                   , ARB_half_float_vertex                  ,  x ,  x ,  x , ES2, 2005)
 EXT(OES_viewport_array                      , OES_viewport_array                     ,  x ,  x ,  x ,  31, 2010)
+EXT(OVR_multiview                           , OVR_multiview                          ,  x , 30 ,  x ,  30, 2016)
 
 EXT(S3_s3tc                                 , ANGLE_texture_compression_dxt          , GLL, GLC,  x ,  x , 1999)
 

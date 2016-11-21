@@ -442,6 +442,9 @@ ast_type_qualifier::merge_in_qualifier(YYLTYPE *loc,
    valid_in_mask.flags.i = 0;
 
    switch (state->stage) {
+   case MESA_SHADER_VERTEX:
+      valid_in_mask.flags.q.num_views = 1;
+      break;
    case MESA_SHADER_TESS_EVAL:
       if (q.flags.q.prim_type) {
          /* Make sure this is a valid input primitive type. */
@@ -499,9 +502,10 @@ ast_type_qualifier::merge_in_qualifier(YYLTYPE *loc,
       valid_in_mask.flags.q.local_size_variable = 1;
       break;
    default:
+      /* XXX: 'only' doesn't fit well here any more I suppose... */
       _mesa_glsl_error(loc, state,
                        "input layout qualifiers only valid in "
-                       "geometry, fragment and compute shaders");
+                       "vertex, geometry, fragment and compute shaders");
       break;
    }
 

@@ -177,6 +177,15 @@ intel_create_wrapped_renderbuffer(struct gl_context * ctx,
 				  int width, int height,
 				  mesa_format format);
 
+/* XXX: could perhaps be simpler if it took an attachment */
+bool
+intel_renderbuffer_update_wrapper(struct brw_context *brw,
+                                  struct intel_renderbuffer *irb,
+                                  struct gl_texture_image *image,
+                                  uint32_t base_layer,
+                                  int viewid,
+                                  bool layered);
+
 extern void
 intel_fbo_init(struct brw_context *brw);
 

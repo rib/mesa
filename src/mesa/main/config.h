@@ -314,5 +314,12 @@
  */
 #define MAX_CLIPPED_VERTICES ((2 * (6 + MAX_CLIP_PLANES))+1)
 
+/**
+ * Maximum number of views that can be associated with a layered
+ * framebuffer attachment.
+ *
+ * For OVR_multiview
+ */
+#define MAX_VIEWS 4
 
 #endif /* MESA_CONFIG_H_INCLUDED */

@@ -65,6 +65,13 @@ vec4_vs_visitor::make_reg_for_system_value(int location)
       reg->writemask = WRITEMASK_X;
       vs_prog_data->uses_drawid = true;
       break;
+   case SYSTEM_VALUE_VIEW_ID:
+      /* TODO: understanding the roling component writemasks here
+       * Should we try and pack with DrawID?
+       */
+      reg->writemask = WRITEMASK_X;
+      vs_prog_data->uses_viewid = true;
+      break;
    default:
       unreachable("not reached");
    }

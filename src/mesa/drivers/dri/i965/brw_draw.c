@@ -396,6 +396,9 @@ brw_postdraw_set_buffers_need_resolve(struct brw_context *brw)
    }
 }
 
+/* XXX: this function doesn't seem to do anything besides
+ * indirectly validate the renderbuffer class id?
+ */
 static void
 brw_predraw_set_aux_buffers(struct brw_context *brw)
 {
@@ -415,6 +418,149 @@ brw_predraw_set_aux_buffers(struct brw_context *brw)
    }
 }
 
+static void
+brw_draw_prim(struct gl_context *ctx,
+              const struct gl_vertex_array *arrays[],
+              const struct _mesa_prim *prim,
+              const struct _mesa_index_buffer *ib,
+              bool index_bounds_valid,
+              GLuint min_index,
+              GLuint max_index,
+              struct brw_transform_feedback_object *xfb_obj,
+              unsigned stream,
+              struct gl_buffer_object *indirect,
+              bool first)
+{
+   struct brw_context *brw = brw_context(ctx);
+   int estimated_max_prim_size;
+   const int sampler_state_size = 16;
+   bool fail_next = false;
+
+   estimated_max_prim_size = 512; /* batchbuffer commands */
+   estimated_max_prim_size += BRW_MAX_TEX_UNIT *
+      (sampler_state_size + sizeof(struct gen5_sampler_default_color));
+   estimated_max_prim_size += 1024; /* gen6 VS push constants */
+   estimated_max_prim_size += 1024; /* gen6 WM push constants */
+   estimated_max_prim_size += 512; /* misc. pad */
+
+   /* Flush the batch if it's approaching full, so that we don't wrap while
+    * we've got validated state that needs to be in the same batch as the
+    * primitives.
+    */
+   intel_batchbuffer_require_space(brw, estimated_max_prim_size, RENDER_RING);
+   intel_batchbuffer_save_state(brw);
+
+   if (brw->num_instances != prim->num_instances ||
+       brw->basevertex != prim->basevertex ||
+       brw->baseinstance != prim->base_instance) {
+      brw->num_instances = prim->num_instances;
+      brw->basevertex = prim->basevertex;
+      brw->baseinstance = prim->base_instance;
+      if (!first) { /* we'll have done this before the first primitives*/
+         brw->ctx.NewDriverState |= BRW_NEW_VERTICES;
+         brw_merge_inputs(brw, arrays);
+      }
+   }
+
+   /* Determine if we need to flag BRW_NEW_VERTICES for updating the
+    * gl_BaseVertexARB or gl_BaseInstanceARB values. For indirect draw, we
+    * always flag if the shader uses one of the values. For direct draws,
+    * we only flag if the values change.
+    */
+   const int new_basevertex =
+      prim->indexed ? prim->basevertex : prim->start;
+   const int new_baseinstance = prim->base_instance;
+   const struct brw_vs_prog_data *vs_prog_data =
+      brw_vs_prog_data(brw->vs.base.prog_data);
+   if (!first) {
+      const bool uses_draw_parameters =
+         vs_prog_data->uses_basevertex ||
+         vs_prog_data->uses_baseinstance;
+
+      if ((uses_draw_parameters && prim->is_indirect) ||
+          (vs_prog_data->uses_basevertex &&
+           brw->draw.params.gl_basevertex != new_basevertex) ||
+          (vs_prog_data->uses_baseinstance &&
+           brw->draw.params.gl_baseinstance != new_baseinstance))
+         brw->ctx.NewDriverState |= BRW_NEW_VERTICES;
+   }
+
+   brw->draw.params.gl_basevertex = new_basevertex;
+   brw->draw.params.gl_baseinstance = new_baseinstance;
+   drm_intel_bo_unreference(brw->draw.draw_params_bo);
+
+   if (prim->is_indirect) {
+      /* Point draw_params_bo at the indirect buffer. */
+      brw->draw.draw_params_bo =
+         intel_buffer_object(ctx->DrawIndirectBuffer)->buffer;
+      drm_intel_bo_reference(brw->draw.draw_params_bo);
+      brw->draw.draw_params_offset =
+         prim->indirect_offset + (prim->indexed ? 12 : 8);
+   } else {
+      /* Set draw_params_bo to NULL so brw_prepare_vertices knows it
+       * has to upload gl_BaseVertex and such if they're needed.
+       */
+      brw->draw.draw_params_bo = NULL;
+      brw->draw.draw_params_offset = 0;
+   }
+
+   /* XXX: revert these left-over comment changes...
+    * gl_DrawID and gl_ViewID_OVR always needs their own vertex buffer since
+    * they're not part of the indirect parameter buffer. If the program uses
+    * either we need to flag BRW_NEW_VERTICES. For the first iteration, we
+    * don't have valid vs_prog_data, but we always flag BRW_NEW_VERTICES
+    * before the loop.
+    */
+   brw->draw.gl_drawid = prim->draw_id;
+   drm_intel_bo_unreference(brw->draw.draw_id_bo);
+   brw->draw.draw_id_bo = NULL;
+   if ((!first) && vs_prog_data->uses_drawid) {
+         brw->ctx.NewDriverState |= BRW_NEW_VERTICES;
+   }
+
+   if (brw->gen < 6)
+      brw_set_prim(brw, prim);
+   else
+      gen6_set_prim(brw, prim);
+
+retry:
+
+   /* Note that before drawing the first prim brw->ctx.NewDriverState
+    * was set to != 0, and that the state updated in the loop outside
+    * of this block is that in *_set_prim or
+    * intel_batchbuffer_flush(), which only impacts
+    * brw->ctx.NewDriverState.
+    */
+   if (brw->ctx.NewDriverState) {
+      brw->no_batch_wrap = true;
+      brw_upload_render_state(brw);
+   }
+
+   brw_emit_prim(brw, prim, brw->primitive, xfb_obj, stream);
+
+   brw->no_batch_wrap = false;
+
+   if (dri_bufmgr_check_aperture_space(&brw->batch.bo, 1)) {
+      if (!fail_next) {
+         intel_batchbuffer_reset_to_saved(brw);
+         intel_batchbuffer_flush(brw);
+         fail_next = true;
+         goto retry;
+      } else {
+         int ret = intel_batchbuffer_flush(brw);
+         WARN_ONCE(ret == -ENOSPC,
+                   "i965: Single primitive emit exceeded "
+                   "available aperture space\n");
+      }
+   }
+
+   /* Now that we know we haven't run out of aperture space, we can safely
+    * reset the dirty bits.
+    */
+   if (brw->ctx.NewDriverState)
+      brw_render_state_finished(brw);
+}
+
 /* May fail if out of video memory for texture or vbo upload, or on
  * fallback conditions.
  */
@@ -432,8 +578,8 @@ brw_try_draw_prims(struct gl_context *ctx,
                    struct gl_buffer_object *indirect)
 {
    struct brw_context *brw = brw_context(ctx);
-   GLuint i;
-   bool fail_next = false;
+   struct gl_framebuffer *fb = ctx->DrawBuffer;
+   bool first = true;
 
    if (ctx->NewState)
       _mesa_update_state(ctx);
@@ -445,11 +591,26 @@ brw_try_draw_prims(struct gl_context *ctx,
     * software fallback will segfault if it attempts to access any
     * texture level other than level 0.
     */
+   /* XXX: is this an out of date comment? brw_draw_prim() suggests that it
+    * doesn't attempt software fallbacks any more since swrast doesn't support
+    * enough features for that. I think maybe the only swrast fallback path left
+    * is for the old GL_SELECT mode.
+    * (trying to understand if I can get away with moving the
+    * _mesa_update_state() down below this into the viewid update loop
+    * - while I don't have a very precise way of handling the state update for
+    * changing fbo texture attachment layers)
+    */
    brw_validate_textures(brw);
 
    /* Find the highest sampler unit used by each shader program.  A bit-count
     * won't work since ARB programs use the texture unit number as the sampler
     * index.
+    *
+    * XXX: couldn't this be done via a _NEW_PROGRAM state atom so it wouldn't
+    * need to be repeated per-primitive if the program hasn't changed?
+    * (could help me move _mesa_update_state() down into the viewid update
+    * loop for now - while I don't have a very precise way of handling
+    * the state update for changing fbo texture attachment layers)
     */
    brw->wm.base.sampler_count =
       util_last_bit(ctx->FragmentProgram._Current->SamplersUsed);
@@ -463,7 +624,7 @@ brw_try_draw_prims(struct gl_context *ctx,
       util_last_bit(ctx->VertexProgram._Current->SamplersUsed);
 
    intel_prepare_render(brw);
-   brw_predraw_set_aux_buffers(brw);
+   brw_predraw_set_aux_buffers(brw); //XXX: currently a NOP
 
    /* This workaround has to happen outside of brw_upload_render_state()
     * because it may flush the batchbuffer for a blit, affecting the state
@@ -483,131 +644,103 @@ brw_try_draw_prims(struct gl_context *ctx,
    brw->vb.max_index = max_index;
    brw->ctx.NewDriverState |= BRW_NEW_VERTICES;
 
-   for (i = 0; i < nr_prims; i++) {
-      int estimated_max_prim_size;
-      const int sampler_state_size = 16;
 
-      estimated_max_prim_size = 512; /* batchbuffer commands */
-      estimated_max_prim_size += BRW_MAX_TEX_UNIT *
-         (sampler_state_size + sizeof(struct gen5_sampler_default_color));
-      estimated_max_prim_size += 1024; /* gen6 VS push constants */
-      estimated_max_prim_size += 1024; /* gen6 WM push constants */
-      estimated_max_prim_size += 512; /* misc. pad */
+   /* For now we assume the cost of naively switching views will out
+    * weigh any potential benefits from HW caching got by
+    * reprocessing each primitive across all views before moving to
+    * the next primitive.
+    *
+    * We'll play around with different approaches later and try and
+    * measure the trade offs.
+    *
+    * Probably the next iteration will overload the instance ID to
+    * also represent the ViewID by multipling the instance count by
+    * the number of views with some fixups in shaders to hide that
+    * from applications. This combined with layered rendering
+    * based on the ViewID.
+    */
+   for (int view = 0; view < fb->NumViews; view++) {
 
-      /* Flush the batch if it's approaching full, so that we don't wrap while
-       * we've got validated state that needs to be in the same batch as the
-       * primitives.
+      brw->draw.gl_viewid = view;
+
+      /* gl_ViewID_OVR always needs its own vertex buffer since
+       * it's not part of the indirect parameter buffer.
        */
-      intel_batchbuffer_require_space(brw, estimated_max_prim_size, RENDER_RING);
-      intel_batchbuffer_save_state(brw);
+      drm_intel_bo_unreference(brw->draw.view_id_bo);
+      brw->draw.view_id_bo = NULL;
 
-      if (brw->num_instances != prims[i].num_instances ||
-          brw->basevertex != prims[i].basevertex ||
-          brw->baseinstance != prims[i].base_instance) {
-         brw->num_instances = prims[i].num_instances;
-         brw->basevertex = prims[i].basevertex;
-         brw->baseinstance = prims[i].base_instance;
-         if (i > 0) { /* For i == 0 we just did this before the loop */
-            brw->ctx.NewDriverState |= BRW_NEW_VERTICES;
-            brw_merge_inputs(brw, arrays);
-         }
-      }
-
-      /* Determine if we need to flag BRW_NEW_VERTICES for updating the
-       * gl_BaseVertexARB or gl_BaseInstanceARB values. For indirect draw, we
-       * always flag if the shader uses one of the values. For direct draws,
-       * we only flag if the values change.
+      /* vs_prog_data isn't valid for the first iteration but
+       * BRW_NEW_VERTICES is set unconditionally above anyway.  For
+       * subsequent views we may need to reemit vertex elements if vs
+       * uses gl_ViewID_OVR
        */
-      const int new_basevertex =
-         prims[i].indexed ? prims[i].basevertex : prims[i].start;
-      const int new_baseinstance = prims[i].base_instance;
-      const struct brw_vs_prog_data *vs_prog_data =
-         brw_vs_prog_data(brw->vs.base.prog_data);
-      if (i > 0) {
-         const bool uses_draw_parameters =
-            vs_prog_data->uses_basevertex ||
-            vs_prog_data->uses_baseinstance;
+      if (view > 0) {
+         const struct brw_vs_prog_data *vs_prog_data =
+            brw_vs_prog_data(brw->vs.base.prog_data);
 
-         if ((uses_draw_parameters && prims[i].is_indirect) ||
-             (vs_prog_data->uses_basevertex &&
-              brw->draw.params.gl_basevertex != new_basevertex) ||
-             (vs_prog_data->uses_baseinstance &&
-              brw->draw.params.gl_baseinstance != new_baseinstance))
+         if (vs_prog_data->uses_viewid)
             brw->ctx.NewDriverState |= BRW_NEW_VERTICES;
       }
 
-      brw->draw.params.gl_basevertex = new_basevertex;
-      brw->draw.params.gl_baseinstance = new_baseinstance;
-      drm_intel_bo_unreference(brw->draw.draw_params_bo);
-
-      if (prims[i].is_indirect) {
-         /* Point draw_params_bo at the indirect buffer. */
-         brw->draw.draw_params_bo =
-            intel_buffer_object(ctx->DrawIndirectBuffer)->buffer;
-         drm_intel_bo_reference(brw->draw.draw_params_bo);
-         brw->draw.draw_params_offset =
-            prims[i].indirect_offset + (prims[i].indexed ? 12 : 8);
-      } else {
-         /* Set draw_params_bo to NULL so brw_prepare_vertices knows it
-          * has to upload gl_BaseVertex and such if they're needed.
-          */
-         brw->draw.draw_params_bo = NULL;
-         brw->draw.draw_params_offset = 0;
+      /* HAMMER!
+       * TOOD: hopefully find a more precise surgical instrument later
+       */
+      if (view > 1) {
+         brw->NewGLState |= _NEW_BUFFERS;
+         _mesa_update_state(ctx);
       }
 
-      /* gl_DrawID always needs its own vertex buffer since it's not part of
-       * the indirect parameter buffer. If the program uses gl_DrawID we need
-       * to flag BRW_NEW_VERTICES. For the first iteration, we don't have
-       * valid vs_prog_data, but we always flag BRW_NEW_VERTICES before
-       * the loop.
-       */
-      brw->draw.gl_drawid = prims[i].draw_id;
-      drm_intel_bo_unreference(brw->draw.draw_id_bo);
-      brw->draw.draw_id_bo = NULL;
-      if (i > 0 && vs_prog_data->uses_drawid)
-         brw->ctx.NewDriverState |= BRW_NEW_VERTICES;
-
-      if (brw->gen < 6)
-         brw_set_prim(brw, &prims[i]);
-      else
-         gen6_set_prim(brw, &prims[i]);
-
-retry:
-
-      /* Note that before the loop, brw->ctx.NewDriverState was set to != 0, and
-       * that the state updated in the loop outside of this block is that in
-       * *_set_prim or intel_batchbuffer_flush(), which only impacts
-       * brw->ctx.NewDriverState.
-       */
-      if (brw->ctx.NewDriverState) {
-         brw->no_batch_wrap = true;
-         brw_upload_render_state(brw);
+      for (int i = 0; i < nr_prims; i++) {
+         brw_draw_prim(ctx,
+                       arrays,
+                       prims + i,
+                       ib,
+                       index_bounds_valid,
+                       min_index,
+                       max_index,
+                       xfb_obj,
+                       stream,
+                       indirect,
+                       first);
+         first = false;
       }
-
-      brw_emit_prim(brw, &prims[i], brw->primitive, xfb_obj, stream);
-
-      brw->no_batch_wrap = false;
-
-      if (dri_bufmgr_check_aperture_space(&brw->batch.bo, 1)) {
-         if (!fail_next) {
-            intel_batchbuffer_reset_to_saved(brw);
-            intel_batchbuffer_flush(brw);
-            fail_next = true;
-            goto retry;
-         } else {
-            int ret = intel_batchbuffer_flush(brw);
-            WARN_ONCE(ret == -ENOSPC,
-                      "i965: Single primitive emit exceeded "
-                      "available aperture space\n");
-         }
-      }
-
-      /* Now that we know we haven't run out of aperture space, we can safely
-       * reset the dirty bits.
-       */
-      if (brw->ctx.NewDriverState)
-         brw_render_state_finished(brw);
    }
+
+   /* XXX: for now the FinishRenderTexture hook is no longer called by
+    * mesa/main so we e.g. need to make sure to MI_FLUSH after
+    * rendering to textures
+    */
+   // does ~ what check_end_texture_render() used to do...
+   //
+   // XXX: not a final solution
+   //
+   // XXX: actually this is pretty terrible to be doing per primitive
+   // without also recognising when the DrawBuffer has changed! (i.e.
+   // we havn't actually 'finished')
+   //
+   // XXX: Can we actually remove this altogether and rely on
+   // brw_render_cache_set_check_flush() called by intel_update_state.
+   // intel_update_state iterates through all images attached to all
+   // shader stages to ensure they are resolved before sampling and
+   // calling brw_render_cache_check_flush() which looks like it
+   // handles flushing caches before sampling from a rendered target
+   // which is essentially what intel_finish_render_texture is
+   // doing too.
+#if 0
+   {
+      struct gl_framebuffer *fb = ctx->DrawBuffer;
+
+      if (!_mesa_is_winsys_fbo(fb)) {
+         /* XXX: might be good to have a flag that saves us iterating
+          * attachments if we know if none of them are textures */
+         for (i = 0; i < BUFFER_COUNT; i++) {
+            struct gl_renderbuffer_attachment *att = fb->Attachment + i;
+            if (att->Texture && att->Renderbuffer->TexImage)
+               intel_finish_render_texture(ctx, att->RenderBuffer);
+         }
+      }
+   }
+#endif
 
    if (brw->always_flush_batch)
       intel_batchbuffer_flush(brw);
@@ -635,6 +768,10 @@ brw_draw_prims(struct gl_context *ctx,
    struct brw_transform_feedback_object *xfb_obj =
       (struct brw_transform_feedback_object *) gl_xfb_obj;
 
+   /* Note OVR_multiview has relaxed rules about queries (allowing to report
+    * the sum) so we leave conditional rendering checks unafected by ViewID
+    * changes.
+    */
    if (!brw_check_conditional_render(brw))
       return;
 

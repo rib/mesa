@@ -482,6 +482,11 @@ typedef enum
     */
    SYSTEM_VALUE_VERTEX_CNT,
 
+   /**
+    * OVR_multiview view ID
+    */
+   SYSTEM_VALUE_VIEW_ID,
+
    SYSTEM_VALUE_MAX             /**< Number of values */
 } gl_system_value;
 

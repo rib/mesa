@@ -2183,6 +2183,10 @@ struct gl_shader_info
    bool pixel_center_integer;
 
    struct {
+      GLuint NumViews;
+   } Vert;
+
+   struct {
       /** Global xfb_stride out qualifier if any */
       GLuint BufferStride[MAX_FEEDBACK_BUFFERS];
    } TransformFeedback;
@@ -3171,6 +3175,8 @@ struct gl_renderbuffer_attachment
    GLuint Zoffset;      /**< Slice for 3D textures,  or layer for both 1D
                          * and 2D array textures */
    GLboolean Layered;
+   GLuint NumViews;     /**< Number of viewports associated with sequential
+                         * layers */
 };
 
 
@@ -3271,6 +3277,11 @@ struct gl_framebuffer
     * in the case that _HasAttachments is false
     */
    GLuint MaxNumLayers;
+
+   /**
+    * OVR_multiview: the number of views associated with all attachments.
+    */
+   GLuint NumViews;
 
    /** Array of all renderbuffer attachments, indexed by BUFFER_* tokens. */
    struct gl_renderbuffer_attachment Attachment[BUFFER_COUNT];
@@ -3755,6 +3766,9 @@ struct gl_constants
 
    /** GL_OES_primitive_bounding_box */
    bool NoPrimitiveBoundingBoxOutput;
+
+   /** OVR_multiview */
+   GLint MaxViews;
 };
 
 
@@ -3963,6 +3977,7 @@ struct gl_extensions
    GLboolean OES_compressed_ETC1_RGB8_texture;
    GLboolean OES_geometry_shader;
    GLboolean OES_texture_compression_astc;
+   GLboolean OVR_multiview;
    GLboolean extension_sentinel;
    /** The extension string */
    const GLubyte *String;

@@ -302,6 +302,8 @@ _mesa_glsl_parse_state::_mesa_glsl_parse_state(struct gl_context *_ctx,
       ctx->Const.AllowGLSLExtensionDirectiveMidShader;
 
    this->cs_input_local_size_variable_specified = false;
+
+   this->vs_num_views = 1;
 }
 
 /**
@@ -689,6 +691,7 @@ static const _mesa_glsl_extension _mesa_glsl_supported_extensions[] = {
    EXT_AEP(EXT_texture_cube_map_array),
    EXT(MESA_shader_integer_functions),
    EXT(NV_image_formats),
+   EXT(OVR_multiview),
 };
 
 #undef EXT
@@ -1706,6 +1709,9 @@ set_shader_inout_layout(struct gl_shader *shader,
    }
 
    switch (shader->Stage) {
+   case MESA_SHADER_VERTEX:
+      shader->info.Vert.NumViews = state->vs_num_views;
+      break;
    case MESA_SHADER_TESS_CTRL:
       shader->info.TessCtrl.VerticesOut = 0;
       if (state->tcs_output_vertices_specified) {

@@ -87,6 +87,12 @@ vec4_visitor::nir_setup_system_value_intrinsic(nir_intrinsic_instr *instr)
          *reg = *make_reg_for_system_value(SYSTEM_VALUE_DRAW_ID);
       break;
 
+   case nir_intrinsic_load_view_id:
+      reg = &nir_system_values[SYSTEM_VALUE_VIEW_ID];
+      if (reg->file == BAD_FILE)
+         *reg = *make_reg_for_system_value(SYSTEM_VALUE_VIEW_ID);
+      break;
+
    default:
       break;
    }
@@ -675,7 +681,8 @@ vec4_visitor::nir_emit_intrinsic(nir_intrinsic_instr *instr)
    case nir_intrinsic_load_instance_id:
    case nir_intrinsic_load_base_instance:
    case nir_intrinsic_load_draw_id:
-   case nir_intrinsic_load_invocation_id: {
+   case nir_intrinsic_load_invocation_id:
+   case nir_intrinsic_load_view_id: {
       gl_system_value sv = nir_system_value_from_intrinsic(instr->intrinsic);
       src_reg val = src_reg(nir_system_values[sv]);
       assert(val.file != BAD_FILE);

@@ -686,6 +686,12 @@ brw_prepare_shader_draw_parameters(struct brw_context *brw)
                         &brw->draw.draw_id_bo,
                         &brw->draw.draw_id_offset);
    }
+
+   if (vs_prog_data->uses_viewid) {
+      intel_upload_data(brw, &brw->draw.gl_viewid, sizeof(brw->draw.gl_viewid), 4,
+                        &brw->draw.view_id_bo,
+                        &brw->draw.view_id_offset);
+   }
 }
 
 /**
@@ -786,6 +792,8 @@ brw_emit_vertices(struct brw_context *brw)
       ++nr_elements;
    if (vs_prog_data->uses_drawid)
       nr_elements++;
+   if (vs_prog_data->uses_viewid)
+      nr_elements++;
 
    /* If the VS doesn't read any inputs (calculating vertex position from
     * a state variable for some reason, for example), emit a single pad
@@ -823,7 +831,9 @@ brw_emit_vertices(struct brw_context *brw)
       vs_prog_data->uses_basevertex ||
       vs_prog_data->uses_baseinstance;
    const unsigned nr_buffers = brw->vb.nr_buffers +
-      uses_draw_params + vs_prog_data->uses_drawid;
+      uses_draw_params +
+      vs_prog_data->uses_drawid +
+      vs_prog_data->uses_viewid;
 
    if (nr_buffers) {
       if (brw->gen >= 6) {
@@ -863,6 +873,16 @@ brw_emit_vertices(struct brw_context *brw)
                                   brw->draw.draw_id_bo,
                                   brw->draw.draw_id_offset,
                                   brw->draw.draw_id_bo->size,
+                                  0,  /* stride */
+                                  0); /* step rate */
+      }
+
+      /* XXX: CHECK: I guess it's ok to have gaps in the buffer IDs? */
+      if (vs_prog_data->uses_viewid) {
+         EMIT_VERTEX_BUFFER_STATE(brw, brw->vb.nr_buffers + 2,
+                                  brw->draw.view_id_bo,
+                                  brw->draw.view_id_offset,
+                                  brw->draw.view_id_bo->size,
                                   0,  /* stride */
                                   0); /* step rate */
       }
@@ -969,7 +989,11 @@ brw_emit_vertices(struct brw_context *brw)
          dw0 |= BRW_VE0_VALID |
                 brw->vb.nr_buffers << BRW_VE0_INDEX_SHIFT |
                 BRW_SURFACEFORMAT_R32G32_UINT << BRW_VE0_FORMAT_SHIFT;
-	 dw1 |= (i * 4) << BRW_VE1_DST_OFFSET_SHIFT;
+         /* XXX: don't have HW to test on but from inspection it looks like we
+          * should increment i to ensure later elements don't get copied to the
+          * same URB offset...
+          */
+	 dw1 |= (i++ * 4) << BRW_VE1_DST_OFFSET_SHIFT;
       }
 
       /* Note that for gl_VertexID, gl_InstanceID, and gl_PrimitiveID values,
@@ -997,7 +1021,37 @@ brw_emit_vertices(struct brw_context *brw)
                 ((brw->vb.nr_buffers + 1) << BRW_VE0_INDEX_SHIFT) |
                 (BRW_SURFACEFORMAT_R32_UINT << BRW_VE0_FORMAT_SHIFT);
 
-	 dw1 |= (i * 4) << BRW_VE1_DST_OFFSET_SHIFT;
+         /* Note: at this point i represents the URB offset for the element to
+          * be copied to. We post increment for any further elements
+          */
+	 dw1 |= (i++ * 4) << BRW_VE1_DST_OFFSET_SHIFT;
+      }
+
+      OUT_BATCH(dw0);
+      OUT_BATCH(dw1);
+   }
+
+   if (vs_prog_data->uses_viewid) {
+      uint32_t dw0 = 0, dw1 = 0;
+
+      dw1 = (BRW_VE1_COMPONENT_STORE_SRC << BRW_VE1_COMPONENT_0_SHIFT) |
+            (BRW_VE1_COMPONENT_STORE_0   << BRW_VE1_COMPONENT_1_SHIFT) |
+            (BRW_VE1_COMPONENT_STORE_0   << BRW_VE1_COMPONENT_2_SHIFT) |
+            (BRW_VE1_COMPONENT_STORE_0   << BRW_VE1_COMPONENT_3_SHIFT);
+
+      if (brw->gen >= 6) {
+         dw0 |= GEN6_VE0_VALID |
+                ((brw->vb.nr_buffers + 2) << GEN6_VE0_INDEX_SHIFT) |
+                (BRW_SURFACEFORMAT_R32_UINT << BRW_VE0_FORMAT_SHIFT);
+      } else {
+         dw0 |= BRW_VE0_VALID |
+                ((brw->vb.nr_buffers + 2) << BRW_VE0_INDEX_SHIFT) |
+                (BRW_SURFACEFORMAT_R32_UINT << BRW_VE0_FORMAT_SHIFT);
+
+         /* Note: at this point i represents the URB offset for the element to
+          * be copied to. We post increment for any further elements
+          */
+	 dw1 |= (i++ * 4) << BRW_VE1_DST_OFFSET_SHIFT;
       }
 
       OUT_BATCH(dw0);

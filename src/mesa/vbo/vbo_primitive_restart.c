@@ -182,6 +182,9 @@ vbo_sw_primitive_restart(struct gl_context *ctx,
    GLboolean map_ib = ib->obj->Name && !ib->obj->Mappings[MAP_INTERNAL].Pointer;
    void *ptr;
 
+   _mesa_perf_debug(ctx, MESA_DEBUG_SEVERITY_MEDIUM,
+                    "Handling primitive restart manually on the cpu");
+
    /* If there is an indirect buffer, map it and extract the draw params */
    if (indirect && prims[0].is_indirect) {
       const uint32_t *indirect_params;

@@ -1509,7 +1509,7 @@ layout_qualifier_id:
       }
 
       if (!$$.flags.i) {
-         _mesa_glsl_error(& @1, state, "unrecognized layout identifier "
+         _mesa_glsl_error(& @1, state, "unrecognized layout identifier foo"
                           "`%s'", $1);
          YYERROR;
       }
@@ -1667,6 +1667,17 @@ layout_qualifier_id:
             _mesa_glsl_error(& @1, state,
                              "vertices qualifier requires GLSL 4.00 or "
                              "ARB_tessellation_shader");
+         }
+      }
+
+      if (match_layout_qualifier("num_views", $1, state) == 0) {
+         $$.flags.q.num_views = 1;
+         $$.num_views = new(ctx) ast_layout_expression(@1, $3);
+         if (!state->OVR_multiview_enable ||
+            state->stage != MESA_SHADER_VERTEX) {
+               _mesa_glsl_error(& @1, state,
+                                "num_views qualifiers only "
+                                "valid with vertex shader in");
          }
       }
 
