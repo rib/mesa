@@ -1171,6 +1171,8 @@ struct brw_context
          uint64_t eu_threads_count;    /** $EuThreadsCount */
          uint64_t subslice_mask;       /** $SliceMask */
          uint64_t slice_mask;          /** $SubsliceMask */
+         uint64_t gt_min_freq;         /** $GpuMinFrequency */
+         uint64_t gt_max_freq;         /** $GpuMaxFrequency */
       } sys_vars;
 
       /* The system's page size */
