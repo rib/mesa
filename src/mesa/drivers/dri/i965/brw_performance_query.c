@@ -552,6 +552,7 @@ init_oa_sys_vars(struct brw_context *brw)
          ss_max = 3;
 
          /* NB: the timestamp frequency is different for Broxton */
+         /* XXX: would need to replace assert before proposing to upstream... */
          assert(!brw->is_broxton);
 
          brw->perfquery.sys_vars.timestamp_frequency = 12000000;
