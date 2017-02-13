@@ -606,9 +606,9 @@ init_oa_sys_vars(struct brw_context *brw)
 }
 
 static uint64_t
-read_report_timestamp(struct brw_context *brw, uint32_t *report)
+brw_timebase_scale(struct brw_context *brw, uint32_t u32_time_delta)
 {
-   uint64_t tmp = ((uint64_t)report[1]) * 1000000000;
+   uint64_t tmp = ((uint64_t)u32_time_delta) * 1000000000ull;
 
    return tmp ? tmp / brw->perfquery.sys_vars.timestamp_frequency : 0;
 }
@@ -774,12 +774,15 @@ read_oa_samples(struct brw_context *brw)
  * Accumulate OA counter results from a series of snapshots.
  *
  * N.B. We write snapshots for the beginning and end of a query into
- * query->oa.bo as well as collect periodic snapshots from the Linux
- * perf interface.
+ * query->oa.bo as well as collect periodic snapshots from the drm
+ * i915 perf interface.
  *
  * These periodic snapshots help to ensure we handle counter overflow
  * correctly by being frequent enough to ensure we don't miss multiple
- * overflows of a counter between snapshots.
+ * overflows of a counter between snapshots. For Gen8+ the i915 perf
+ * snapshots provide the extra context-switch reports that let us
+ * subtract out the progress of counters associated with other
+ * contexts running on the system.
  */
 static void
 accumulate_oa_snapshots(struct brw_context *brw,
@@ -788,10 +791,10 @@ accumulate_oa_snapshots(struct brw_context *brw,
    struct gl_perf_query_object *o = &obj->base;
    uint32_t *query_buffer;
    uint32_t *start;
-   uint64_t start_timestamp;
    uint32_t *last;
    uint32_t *end;
-   uint64_t end_timestamp;
+   bool in_ctx = true;
+   uint32_t ctx_id;
 
    assert(o->Ready);
 
@@ -813,8 +816,7 @@ accumulate_oa_snapshots(struct brw_context *brw,
       goto error;
    }
 
-   start_timestamp = read_report_timestamp(brw, start);
-   end_timestamp = read_report_timestamp(brw, end);
+   ctx_id = start[2];
 
    /* See if we have any periodic reports to accumulate too... */
 
@@ -836,50 +838,71 @@ accumulate_oa_snapshots(struct brw_context *brw,
          case DRM_I915_PERF_RECORD_SAMPLE: {
             struct oa_sample *sample = (struct oa_sample *)header;
             uint32_t *report = (uint32_t *)sample->oa_report;
-            uint64_t timestamp = read_report_timestamp(brw, report);
+            bool add = true;
 
-            if (timestamp >= end_timestamp)
+            /* Ignore reports that come before the start marker.
+             * (Note: takes care to allow overflow of 32bit timestamps)
+             */
+            if (brw_timebase_scale(brw, report[1] - start[1]) > 5000000000)
+               continue;
+
+            /* Ignore reports that come after the end marker.
+             * (Note: takes care to allow overflow of 32bit timestamps)
+             */
+            if (brw_timebase_scale(brw, report[1] - end[1]) <= 5000000000)
                goto end;
 
-            if (timestamp > start_timestamp) {
+            /* Since the counters continue while other contexts are
+             * running we need to discount any unrelated delta. The
+             * hardware automatically generates a report on context
+             * switch which gives us a new reference point to
+             * continuing adding deltas from.
+             *
+             * Note: Haswell doesn't report a reason within the
+             * RPT_ID field but on haswell we're relying on the
+             * hardware to filter per-context metrics for us
+             * instead.
+             */
+            if (brw->gen >= 8) {
+               uint32_t reason = ((report[0] >> OAREPORT_REASON_SHIFT) &
+                                  OAREPORT_REASON_MASK);
 
-               /* Since the counters continue while other contexts are
-                * running we need to discount any unrelated delta. The
-                * hardware automatically generates a report on context
-                * switch which gives us a new reference point to
-                * continuing adding deltas from.
-                *
-                * Note: Haswell doesn't report a reason within the
-                * RPT_ID field but on haswell we're relying on the
-                * hardware to filter per-context metrics for us
-                * instead.
-                */
-
-               if (brw->gen >= 8) {
-                  uint32_t reason = (report[0] >> OAREPORT_REASON_SHIFT) &
-                     OAREPORT_REASON_MASK;
-
-                  if (!(reason & OAREPORT_REASON_CTX_SWITCH))
-                     add_deltas(brw, obj, last, report);
+               if (in_ctx && report[2] != ctx_id) {
+                  DBG("i915 perf: Switch AWAY (observed by ID change)\n");
+                  in_ctx = false;
+               } else if (in_ctx == false && report[2] == ctx_id &&
+                          (reason & OAREPORT_REASON_CTX_SWITCH) ) {
+                  DBG("i915 perf: Switch TO (report reason = CTX_SWITCH)\n");
+                  in_ctx = true;
+                  add = false;
+               } else if (in_ctx == false && report[2] == ctx_id) {
+                  DBG("i915 perf: Switch TO (observed by ID change)\n");
+                  in_ctx = true;
+                  add = false;
+               } else if (in_ctx) {
+                  assert(report[2] == ctx_id);
+                  DBG("i915 perf: Continuation IN\n");
                } else {
-                  add_deltas(brw, obj, last, report);
+                  assert(report[2] != ctx_id);
+                  DBG("i915 perf: Continuation OUT\n");
+                  add = false;
                }
-
-               last = report;
             }
+
+            if (add)
+               add_deltas(brw, obj, last, report);
+
+            last = report;
 
             break;
          }
 
          case DRM_I915_PERF_RECORD_OA_BUFFER_LOST:
              DBG("i915 perf: OA error: all reports lost\n");
-             break;
+             goto error;
          case DRM_I915_PERF_RECORD_OA_REPORT_LOST:
              DBG("i915 perf: OA report lost\n");
              break;
-
-         default:
-            DBG("i915 perf: Spurious header type = %d\n", header->type);
          }
       }
    }
