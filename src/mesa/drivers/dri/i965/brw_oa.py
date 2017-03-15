@@ -26,6 +26,8 @@ import textwrap
 
 import xml.etree.cElementTree as et
 
+set_blacklist = [ 'TestOa' ]
+
 max_values = {}
 read_funcs = {}
 
@@ -458,6 +460,10 @@ def main():
         max_values = {}
         read_funcs = {}
         counter_vars = {}
+
+        if set.get('symbol_name') in set_blacklist:
+            continue
+
         counters = set.findall("counter")
 
         assert set.get('chipset').lower() == chipset
@@ -544,6 +550,8 @@ def main():
     c_indent(3)
 
     for set in tree.findall(".//set"):
+        if set.get('symbol_name') in set_blacklist:
+            continue
         c("register_" + set.get('underscore_name') + "_counter_query(brw);")
 
     c_outdent(3)
