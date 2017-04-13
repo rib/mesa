@@ -1761,7 +1761,7 @@ init_oa_sys_vars(struct brw_context *brw, const char *sysfs_dev_dir)
          if (brw->is_broxton) {
             s_max = 1;
             threads_per_eu = 6;
-            brw->perfquery.sys_vars.timestamp_frequency = 19200123;
+            brw->perfquery.sys_vars.timestamp_frequency = 19200000;
          } else {
             s_max = 3;
             brw->perfquery.sys_vars.timestamp_frequency = 12000000;
