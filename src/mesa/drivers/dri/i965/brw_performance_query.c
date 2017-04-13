@@ -770,6 +770,7 @@ accumulate_oa_reports(struct brw_context *brw,
    struct exec_node *first_samples_node;
    bool in_ctx = true;
    uint32_t ctx_id;
+   int out_duration = 0;
 
    assert(o->Ready);
 
@@ -850,10 +851,16 @@ accumulate_oa_reports(struct brw_context *brw,
                if (in_ctx && report[2] != ctx_id) {
                   DBG("i915 perf: Switch AWAY (observed by ID change)\n");
                   in_ctx = false;
+                  out_duration = 0;
                } else if (in_ctx == false && report[2] == ctx_id) {
                   DBG("i915 perf: Switch TO\n");
                   in_ctx = true;
-                  add = false;
+
+                  /* We didn't *really* Switch AWAY in the case that we
+                   * e.g. saw a single periodic report while idle...
+                   */
+                  if (out_duration >= 1)
+                     add = false;
                } else if (in_ctx) {
                   assert(report[2] == ctx_id);
                   DBG("i915 perf: Continuation IN\n");
@@ -861,6 +868,7 @@ accumulate_oa_reports(struct brw_context *brw,
                   assert(report[2] != ctx_id);
                   DBG("i915 perf: Continuation OUT\n");
                   add = false;
+                  out_duration++;
                }
             }
 
